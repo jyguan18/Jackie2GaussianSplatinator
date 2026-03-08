@@ -1,0 +1,12 @@
+{
+	"gsplat_groups" : 
+	[
+		{
+			"name" : "neirin_jones",
+			"files" : [
+				"neirin_jones_left.ply",
+				"neirin_jones_right.ply"	
+			]
+		}
+	]
+}
