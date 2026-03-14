@@ -1,0 +1,3 @@
+# Ignore .hip backup files.
+
+backup/
