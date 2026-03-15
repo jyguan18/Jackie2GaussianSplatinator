@@ -1,3 +1,5 @@
 # Ignore .hip backup files.
-
 backup/
+
+# Ignore build folder.
+code/build/
