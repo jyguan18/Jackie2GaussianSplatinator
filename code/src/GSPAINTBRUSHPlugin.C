@@ -12,6 +12,9 @@
 #include <OP/OP_Operator.h>
 #include <OP/OP_OperatorTable.h>
 
+#include <GA/GA_Handle.h>
+#include <GA/GA_Iterator.h>
+#include <sys/SYS_Math.h>
 
 #include <limits.h>
 #include "GSPAINTBRUSHPlugin.h"
@@ -39,10 +42,10 @@ newSopOperator(OP_OperatorTable *table)
 			    "GSPaintBrush",			// UI name
 			     SOP_GSPaintBrush::myConstructor,	// How to build the SOP
 				 SOP_GSPaintBrush::myTemplateList,	// My parameters
-			     0,				// Min # of sources
-			     0,				// Max # of sources
+			     1,				// Min # of sources // We test one source first, source is GS.
+			     1,				// Max # of sources
 				 SOP_GSPaintBrush::myVariables,	// Local variables
-			     OP_FLAG_GENERATOR)		// Flag it as generator
+			     0)		// Not a generator, but a modifier node.
 	    );
 }
 
@@ -142,12 +145,68 @@ SOP_GSPaintBrush::cookMySop(OP_Context &context)
 {
 	fpreal now = context.getTime();
 
-	UT_Vector3 pos = POSITION(now);
+	if (lockInputs(context) >= UT_ERROR_ABORT)
+		return error();
 
-	float radius = RADIUS(now);
-	float scale = SCALE(now);
-	float opacity = OPACITY(now);
+	duplicateSource(0, context);
 
+	UT_Vector3 brushPos = POSITION(now);
+	float      radius = RADIUS(now);
+	float      brushScale = SCALE(now);
+	float      brushOpacity = OPACITY(now);
+	float      radiusSq = radius * radius;
+
+	// Colour of input GSplat. 3 part float vector.
+	GA_RWHandleV3 cdHandle(gdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
+	// Alpha value of input GSplat. 1 value float.
+	GA_RWHandleF alphaHandle(gdp->findFloatTuple(GA_ATTRIB_POINT, "alpha", 1));
+	// Orientation of input GSplat. 4 part quaternion value.
+	GA_RWHandleV4 orientHandle(gdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
+	// Scale of input GSplat. 3 part float vector.
+	GA_RWHandleV3 scaleHandle(gdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
+
+	// Test to determine if input GSplat attribute are actually being read.
+	// Modify size of splats within param brush radius.
+	GA_Offset ptoff;
+	GA_FOR_ALL_PTOFF(gdp, ptoff)
+	{
+		// World position of this splat
+		UT_Vector3 splatPos = gdp->getPos3(ptoff);
+
+		// Distance test against brush centre
+		UT_Vector3 delta = splatPos - brushPos;
+		float distSq = delta.dot(delta);
+		if (distSq > radiusSq)
+			continue;
+
+		// Smooth quadratic falloff: 1.0 at centre, 0.0 at edge
+		float t = distSq / radiusSq;         // 0..1
+		float weight = (1.0f - t) * (1.0f - t); // falloff curve
+
+		// --- Modify alpha ---
+		// GSOPs stores alpha as a linear 0..1 value after import
+		if (alphaHandle.isValid())
+		{
+			float a = alphaHandle.get(ptoff);
+			a = SYSclamp(a * (1.0f + (brushOpacity - 1.0f) * weight), 0.0f, 1.0f);
+			alphaHandle.set(ptoff, a);
+		}
+
+		// --- Modify scale ---
+		// GSOPs stores scale in log-space after import,
+		// so we ADD log(brushScale) rather than multiply
+		if (scaleHandle.isValid())
+		{
+			UT_Vector3 s = scaleHandle.get(ptoff);
+			float logDelta = SYSlog(SYSmax(brushScale, 1e-6f)) * weight;
+			s.x() += logDelta;
+			s.y() += logDelta;
+			s.z() += logDelta;
+			scaleHandle.set(ptoff, s);
+		}
+	}
+
+	unlockInputs();
 	return error();
 }
 
