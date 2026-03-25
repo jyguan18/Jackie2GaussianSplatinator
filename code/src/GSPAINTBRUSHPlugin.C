@@ -14,7 +14,10 @@
 
 #include <GA/GA_Handle.h>
 #include <GA/GA_Iterator.h>
-#include <sys/SYS_Math.h>
+#include <GA/GA_AttributeRefMap.h>
+#include <SYS/SYS_Math.h>
+
+#include <UT/UT_Quaternion.h>
 
 #include <limits.h>
 #include "GSPAINTBRUSHPlugin.h"
@@ -42,41 +45,29 @@ newSopOperator(OP_OperatorTable *table)
 			    "GSPaintBrush",			// UI name
 			     SOP_GSPaintBrush::myConstructor,	// How to build the SOP
 				 SOP_GSPaintBrush::myTemplateList,	// My parameters
-			     1,				// Min # of sources // We test one source first, source is GS.
-			     1,				// Max # of sources
+			     2,				// Min # of sources // We test one source first, source is GS.
+			     2,				// Max # of sources
 				 SOP_GSPaintBrush::myVariables,	// Local variables
 			     0)		// Not a generator, but a modifier node.
 	    );
 }
 
 static PRM_Name names[] = {
-	PRM_Name("position",     "Position"),
-	PRM_Name("radius",   "Radius"),
 	PRM_Name("scale",  "Scale"),
 	PRM_Name("opacity",  "Opacity"),
 };
 
-static PRM_Default positionDefaults[] =
-{
-	PRM_Default(0.0f),
-	PRM_Default(0.0f),
-	PRM_Default(0.0f)
-};
-
-static PRM_Default radiusDefault(1.0f);
 static PRM_Default scaleDefault(1.0f);
 static PRM_Default opacityDefault(1.0f);
+
+static PRM_Range scaleRange(PRM_RANGE_UI, 0.0f, PRM_RANGE_UI, 10.0f);
+static PRM_Range opacityRange(PRM_RANGE_UI, 0.0f, PRM_RANGE_UI, 1.0f);
 
 PRM_Template
 SOP_GSPaintBrush::myTemplateList[] =
 {
-	// vec3 parameter
-	PRM_Template(PRM_FLT, 3, &names[0], positionDefaults),
-
-	// float parameters
-	PRM_Template(PRM_FLT, 1, &names[1], &radiusDefault),
-	PRM_Template(PRM_FLT, 1, &names[2], &scaleDefault),
-	PRM_Template(PRM_FLT, 1, &names[3], &opacityDefault),
+	PRM_Template(PRM_FLT, 1, &names[0], &scaleDefault, nullptr, &scaleRange),
+	PRM_Template(PRM_FLT, 1, &names[1], &opacityDefault, nullptr, &opacityRange),
 
 	PRM_Template()
 };
@@ -140,6 +131,59 @@ SOP_GSPaintBrush::disableParms()
     return 0;
 }
 
+// Rotate instantiated stamp to normal of point.
+// Param from: original orientation of stamp.
+// Param to: normal of point to rotate to.
+static UT_QuaternionF
+rotationBetween(UT_Vector3F from, UT_Vector3F to)
+{
+	from.normalize();
+	to.normalize();
+
+	float dot = from.dot(to);
+
+	// Aligned already.
+	if (dot >= 1.0f - 1e-6f)
+		return UT_QuaternionF(0.f, 0.f, 0.f, 1.f);
+
+	// Opposite direction, rotate 180 degrees.
+	if (dot <= -1.0f + 1e-6f)
+	{
+		UT_Vector3F upVec = UT_Vector3F(1, 0, 0);
+		if (SYSabs(from.dot(upVec)) > 0.9f)
+			upVec = UT_Vector3F(0, 1, 0);
+		upVec = cross(from, upVec);
+		upVec.normalize();
+		UT_QuaternionF q;
+		q.updateFromAngleAxis(M_PI, upVec);
+		return q;
+	}
+
+	// Else.
+	UT_Vector3F axis = cross(from, to);
+	float angle = SYSacos(SYSclamp(dot, -1.f, 1.f));
+	UT_QuaternionF q;
+	q.updateFromAngleAxis(angle, axis);
+	return q;
+}
+
+static UT_Vector3F
+rotateVector(const UT_Vector3F& v, const UT_QuaternionF& q)
+{
+	// Sandwich product: q * v * q^-1
+	UT_QuaternionF qv(v.x(), v.y(), v.z(), 0.f);
+	UT_QuaternionF qInv = q;
+	qInv.invert();
+	UT_QuaternionF result = q * qv * qInv;
+	return UT_Vector3F(result.x(), result.y(), result.z());
+}
+
+static UT_QuaternionF
+multiplyQuat(const UT_QuaternionF& q1, const UT_QuaternionF& q2)
+{
+	return q2 * q1;
+}
+
 OP_ERROR
 SOP_GSPaintBrush::cookMySop(OP_Context &context)
 {
@@ -148,61 +192,174 @@ SOP_GSPaintBrush::cookMySop(OP_Context &context)
 	if (lockInputs(context) >= UT_ERROR_ABORT)
 		return error();
 
-	duplicateSource(0, context);
+	// Create stamp.
+	struct SplatStamp
+	{
+		UT_Vector3 localOffset; // position relative to brushPos
+		float alpha;
+		UT_Vector3 cd;
+		UT_Vector4 orient;
+		UT_Vector3 scale;
+	};
 
-	UT_Vector3 brushPos = POSITION(now);
-	float      radius = RADIUS(now);
 	float      brushScale = SCALE(now);
 	float      brushOpacity = OPACITY(now);
-	float      radiusSq = radius * radius;
+
+	const GU_Detail* splatsGdp = inputGeo(0, context);
+	if (!splatsGdp)
+	{
+		addError(SOP_MESSAGE, "Missing input 0: Gaussian splat cloud.");
+		unlockInputs();
+		return error();
+	}
 
 	// Colour of input GSplat. 3 part float vector.
-	GA_RWHandleV3 cdHandle(gdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
+	GA_ROHandleV3 src_cdHandle(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
 	// Alpha value of input GSplat. 1 value float.
-	GA_RWHandleF alphaHandle(gdp->findFloatTuple(GA_ATTRIB_POINT, "alpha", 1));
+	GA_ROHandleF  src_alphaHandle(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
 	// Orientation of input GSplat. 4 part quaternion value.
-	GA_RWHandleV4 orientHandle(gdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
+	GA_ROHandleV4 src_orientHandle(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
 	// Scale of input GSplat. 3 part float vector.
-	GA_RWHandleV3 scaleHandle(gdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
+	GA_ROHandleV3 src_scaleHandle(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
 
-	// Test to determine if input GSplat attribute are actually being read.
-	// Modify size of splats within param brush radius.
-	GA_Offset ptoff;
-	GA_FOR_ALL_PTOFF(gdp, ptoff)
+	if (!src_alphaHandle.isValid())
+		addWarning(SOP_MESSAGE, "alpha attribute not found on input 0.");
+	if (!src_scaleHandle.isValid())
+		addWarning(SOP_MESSAGE, "scale attribute not found on input 0.");
+	if (!src_orientHandle.isValid())
+		addWarning(SOP_MESSAGE, "orient attribute not found on input 0.");
+
+	UT_Vector3F stampCentroid(0.f, 0.f, 0.f);
+	int numSplatPts = splatsGdp->getNumPoints();
 	{
-		// World position of this splat
-		UT_Vector3 splatPos = gdp->getPos3(ptoff);
+		GA_Offset ptoff;
+		GA_FOR_ALL_PTOFF(splatsGdp, ptoff)
+			stampCentroid += UT_Vector3F(splatsGdp->getPos3(ptoff));
+		stampCentroid /= (float)numSplatPts;
+	}
 
-		// Distance test against brush centre
-		UT_Vector3 delta = splatPos - brushPos;
-		float distSq = delta.dot(delta);
-		if (distSq > radiusSq)
-			continue;
+	// SplatStamp lives in GSPaintBrush.
+	UT_Array<SplatStamp> brushPattern;
+	brushPattern.setCapacity(numSplatPts);
 
-		// Smooth quadratic falloff: 1.0 at centre, 0.0 at edge
-		float t = distSq / radiusSq;         // 0..1
-		float weight = (1.0f - t) * (1.0f - t); // falloff curve
-
-		// --- Modify alpha ---
-		// GSOPs stores alpha as a linear 0..1 value after import
-		if (alphaHandle.isValid())
+	{
+		GA_Offset ptoff;
+		GA_FOR_ALL_PTOFF(splatsGdp, ptoff)
 		{
-			float a = alphaHandle.get(ptoff);
-			a = SYSclamp(a * (1.0f + (brushOpacity - 1.0f) * weight), 0.0f, 1.0f);
-			alphaHandle.set(ptoff, a);
+
+			SplatStamp s;
+			s.localOffset = UT_Vector3F(splatsGdp->getPos3(ptoff)) - stampCentroid;
+
+			s.alpha = src_alphaHandle.isValid()
+				? SYSclamp(src_alphaHandle.get(ptoff) * brushOpacity, 0.0f, 1.0f)
+				: 1.0f;
+
+			// Scale applied in log space.
+			if (src_scaleHandle.isValid())
+			{
+				UT_Vector3F sc = UT_Vector3F(src_scaleHandle.get(ptoff));
+				float logDelta = SYSlog(SYSmax(brushScale, 1e-6f));
+				sc.x() += logDelta;
+				sc.y() += logDelta;
+				sc.z() += logDelta;
+				s.scale = sc;
+			}
+			else
+			{
+				s.scale = UT_Vector3(0, 0, 0);
+			}
+
+			if (src_orientHandle.isValid())
+			{
+				UT_Vector4F ov = UT_Vector4F(src_orientHandle.get(ptoff));
+				s.orient = ov;
+			}
+			else
+			{
+				s.orient = UT_Vector4F(0.f, 0.f, 0.f, 1.f); // identity
+			}
+;
+			s.cd = src_cdHandle.isValid()
+				? src_cdHandle.get(ptoff)
+				: UT_Vector3(1, 1, 1);
+
+			brushPattern.append(s);
 		}
+	}
 
-		// --- Modify scale ---
-		// GSOPs stores scale in log-space after import,
-		// so we ADD log(brushScale) rather than multiply
-		if (scaleHandle.isValid())
+	// Debug: report how many splats were captured in the brush
+	{
+		UT_String msg;
+		msg.sprintf("Brush pattern captured %d splats.", (int)brushPattern.size());
+		addMessage(SOP_MESSAGE, msg);
+	}
+
+	// For point group.
+	const GU_Detail* targetGdp = inputGeo(1, context);
+	if (!targetGdp)
+	{
+		addError(SOP_MESSAGE, "Missing input 1: stamp target points.");
+		unlockInputs();
+		return error();
+	}
+
+	// Normals of points.
+	GA_ROHandleV3 tgt_normal(targetGdp->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
+	if (!tgt_normal.isValid())
+		addWarning(SOP_MESSAGE, "No N attribute on input 1 — using default up vector (0,1,0).");
+
+	const UT_Vector3F stampUpDir(0.f, 1.f, 0.f);
+
+
+	gdp->clearAndDestroy();
+
+	GA_RWHandleV3 out_cdHandle(gdp->addFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
+	GA_RWHandleF  out_alphaHandle(gdp->addFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
+	GA_RWHandleV4 out_orientHandle(gdp->addFloatTuple(GA_ATTRIB_POINT, "orient", 4));
+	GA_RWHandleV3 out_scaleHandle(gdp->addFloatTuple(GA_ATTRIB_POINT, "scale", 3));
+
+	// Stamping logic.
+	{
+		GA_Offset tptoff;
+		GA_FOR_ALL_PTOFF(targetGdp, tptoff)
 		{
-			UT_Vector3 s = scaleHandle.get(ptoff);
-			float logDelta = SYSlog(SYSmax(brushScale, 1e-6f)) * weight;
-			s.x() += logDelta;
-			s.y() += logDelta;
-			s.z() += logDelta;
-			scaleHandle.set(ptoff, s);
+			UT_Vector3 targetPos = targetGdp->getPos3(tptoff);
+
+			UT_Vector3F targetNormal = stampUpDir;
+			if (tgt_normal.isValid())
+			{
+				UT_Vector3F n = UT_Vector3F(tgt_normal.get(tptoff));
+				if (n.length() > 1e-6f)
+				{
+					n.normalize();
+					targetNormal = n;
+				}
+			}
+
+			UT_QuaternionF stampRot = rotationBetween(stampUpDir, targetNormal);
+
+			// Stamp every splat in the brush pattern at this target
+			for (const SplatStamp& s : brushPattern)
+			{
+				// Rotate local offset then translate to target position
+				UT_Vector3F rotatedOffset = rotateVector(s.localOffset, stampRot);
+				UT_Vector3F worldPos = targetPos + rotatedOffset;
+
+				GA_Offset newPt = gdp->appendPoint();
+				gdp->setPos3(newPt, UT_Vector3(worldPos));
+
+				out_alphaHandle.set(newPt, s.alpha);
+				out_cdHandle.set(newPt, UT_Vector3(s.cd));
+				out_scaleHandle.set(newPt, UT_Vector3(s.scale));
+
+				// Rotate the splat's own orient quaternion by stampRot
+				UT_QuaternionF splatOrient(
+					s.orient.x(), s.orient.y(), s.orient.z(), s.orient.w());
+				UT_QuaternionF rotatedOrient = multiplyQuat(splatOrient, stampRot);
+				out_orientHandle.set(newPt, UT_Vector4(
+					rotatedOrient.x(), rotatedOrient.y(),
+					rotatedOrient.z(), rotatedOrient.w()));
+			}
 		}
 	}
 

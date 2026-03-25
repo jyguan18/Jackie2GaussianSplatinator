@@ -64,15 +64,6 @@ private:
             evalFloat(idx, 1, t),
             evalFloat(idx, 2, t));
     }
-
-    UT_Vector3 POSITION(fpreal t) {
-        return evalVector3(0, t);
-    }
-
-    fpreal RADIUS(fpreal t) {
-		return evalFloat("radius", 0, t);
-    }
-
     fpreal SCALE(fpreal t)
     {
         return evalFloat("scale", 0, t);
