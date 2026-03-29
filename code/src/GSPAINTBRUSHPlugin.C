@@ -183,7 +183,6 @@ rotationBetween(UT_Vector3F from, UT_Vector3F to)
 static UT_Vector3F
 rotateVector(const UT_Vector3F& v, const UT_QuaternionF& q)
 {
-	// Sandwich product: q * v * q^-1
 	UT_QuaternionF qv(v.x(), v.y(), v.z(), 0.f);
 	UT_QuaternionF qInv = q;
 	qInv.invert();
@@ -288,6 +287,17 @@ SOP_GSPaintBrush::onPaintStroke(void* data, int index, fpreal t, const PRM_Templ
 		return 1;
 	}
 
+	UT_String plyNodePath("");
+	OP_Node* plyInput = sop->getInput(2);
+	if (plyInput)
+	{
+		plyInput->getFullPath(plyNodePath);
+	}
+	else
+	{
+		sop->addWarning(SOP_MESSAGE, "No PLY input connected to input 2 � canvas raycast will be disabled.");
+	}
+
 	// clear existing points first
 	strokeNode->setString("", CH_StringMeaning::CH_STRING_LITERAL, "point_positions", 0, t);
 	strokeNode->setString("", CH_StringMeaning::CH_STRING_LITERAL, "point_normals", 0, t);
@@ -295,11 +305,12 @@ SOP_GSPaintBrush::onPaintStroke(void* data, int index, fpreal t, const PRM_Templ
 	OP_Context cookContext(t);
 	strokeNode->cook(cookContext);
 
-	// activate the paint viewer state via Python
-	PYrunPythonStatementsAndExpectNoErrors(
+	UT_String pyCmd;
+	pyCmd.sprintf(
 		"import importlib.util\n"
 		"import hou\n"
 		"import os\n"
+		"hou.session.gaussian_paint_canvas_path = '%s'\n"
 		"try:\n"
 		"    sv = hou.ui.paneTabOfType(hou.paneTabType.SceneViewer)\n"
 		"    sv.setCurrentState('Select')\n"
@@ -310,16 +321,15 @@ SOP_GSPaintBrush::onPaintStroke(void* data, int index, fpreal t, const PRM_Templ
 		"except:\n"
 		"    pass\n"
 		"state_file = os.path.join(hou.getenv('HOUDINI_USER_PREF_DIR'), 'viewer_states', 'gaussian_paint.py')\n"
-		"try:\n"
-		"    hou.ui.unregisterViewerState('gaussian_paint')\n"
-		"except:\n"
-		"    pass\n"
 		"spec = importlib.util.spec_from_file_location('gaussian_paint', state_file)\n"
 		"mod  = importlib.util.module_from_spec(spec)\n"
 		"spec.loader.exec_module(mod)\n"
 		"hou.ui.registerViewerState(mod.createViewerStateTemplate())\n"
-		"hou.ui.paneTabOfType(hou.paneTabType.SceneViewer).setCurrentState('gaussian_paint')\n"
+		"hou.ui.paneTabOfType(hou.paneTabType.SceneViewer).setCurrentState('gaussian_paint')\n",
+		plyNodePath.c_str()
 	);
+
+	PYrunPythonStatementsAndExpectNoErrors(pyCmd.buffer());
 
 	return 1;
 }

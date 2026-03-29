@@ -1,7 +1,7 @@
 import hou
 import viewerstate.utils as su
 
-CANVAS_PATH = "/obj/canvas_geo"
+# CANVAS_PATH = "/obj/canvas_geo"
 STROKE_PATH = "/obj/geo1/stroke_points"
 
 class GaussianPaintState:
@@ -13,21 +13,145 @@ class GaussianPaintState:
         self.hit_points   = []
         self.all_strokes  = []
         self.initialized  = False
+        self.canvas_path  = getattr(hou.session, 'gaussian_paint_canvas_path', None) # New, for base surface input from HDK plugin.
+        print(f"[GaussianPaint] Initialized with canvas path: {self.canvas_path}") # Test.
 
     def _raycast(self, mouse_x, mouse_y):
+        if not self.canvas_path:
+            print("[GaussianPaint] No canvas path set — skipping raycast.")
+            return None, None
+        
+        # Checking if we can actually read input 2 for surface input from HDK plugin.
+        canvas = hou.node(self.canvas_path)
+        if canvas is None:
+            print(f"[GaussianPaint] Could not find node: {self.canvas_path}")
+            return None, None
+        
         viewport = self.scene_viewer.curViewport()
         origin, direction = viewport.mapToWorld(mouse_x, mouse_y)
-        canvas = hou.node(CANVAS_PATH)
-        if canvas is None:
-            return None, None
+
         geo  = canvas.displayNode().geometry()
         pos  = hou.Vector3()
         norm = hou.Vector3()
         uvw  = hou.Vector3()
         hit  = geo.intersect(hou.Vector3(origin), hou.Vector3(direction), pos, norm, uvw)
-        if hit < 0:
+        if hit >= 0:
+            return hou.Vector3(pos), hou.Vector3(norm).normalized()
+        
+        return self._raycast_pointcloud(geo, origin, direction)
+
+    def _raycast_pointcloud(self, geo, origin, direction):
+        """
+        Projects the camera ray against all points and finds the nearest one.
+        Returns (position, normal) of the closest .ply point to the ray.
+        """
+        best_t    = -1.0
+        best_dist = float('inf')
+        best_pt   = None
+
+        candidates = []
+        for pt in geo.points():
+            p  = pt.position()
+            op = p - origin
+            t  = op.dot(direction)
+            if t < 0:
+                continue 
+            closest  = origin + direction * t
+            dist_ray = (p - closest).length()
+            candidates.append((dist_ray, t, pt))
+
+        candidates.sort(key=lambda x: x[0])
+
+        for dist_ray, t, pt in candidates:
+            if dist_ray > 0.5: 
+                break
+
+            pos = pt.position()
+
+            if self.last_pos is not None:
+                if (pos - self.last_pos).length() < 0.001:
+                    continue
+
+            best_dist = dist_ray
+            best_pt   = pt
+            break
+        
+        if best_pt is None:
+            print(f"[GaussianPaint] No hit — best_dist={best_dist:.4f}")
             return None, None
-        return hou.Vector3(pos), hou.Vector3(norm).normalized()
+
+        best_pos = best_pt.position()
+        print(f"[GaussianPaint] Hit splat at dist={best_dist:.4f}, pos={best_pos}")
+
+        # Splats do not have normals, they have orientation and position.
+        # Can try to read orientation + position, calculate normal from there.
+        try:
+            n = hou.Vector3(best_pt.attribValue("N"))
+            if n.length() > 1e-6:
+                return best_pos, n.normalized()
+        except:
+            pass
+
+        norm = self._estimate_normal_pca(geo, best_pos, k=8)
+        return best_pos, norm
+
+
+    def _estimate_normal_pca(self, geo, center, k=8):
+        """
+        Estimate surface normal at a point by fitting a plane to the k nearest neighbours using PCA on the covariance matrix.
+        Flips the result to face the camera.
+        """
+        import math
+
+        center = hou.Vector3(center)
+
+        pts_and_dists = []
+        for pt in geo.points():
+            p    = pt.position()
+            diff = p - center
+            d    = diff.length()
+            pts_and_dists.append((d, p))
+
+        pts_and_dists.sort(key=lambda x: x[0])
+        neighbours = [p for _, p in pts_and_dists[1:k+1]]  # skip index 0 (self)
+
+        if len(neighbours) < 3:
+            return hou.Vector3(0, 1, 0)
+
+        cx = sum(p[0] for p in neighbours) / len(neighbours)
+        cy = sum(p[1] for p in neighbours) / len(neighbours)
+        cz = sum(p[2] for p in neighbours) / len(neighbours)
+
+        cov = [[0.0]*3 for _ in range(3)]
+        for p in neighbours:
+            d = [p[0]-cx, p[1]-cy, p[2]-cz]
+            for i in range(3):
+                for j in range(3):
+                    cov[i][j] += d[i] * d[j]
+
+        def mat_vec(m, v):
+            return [sum(m[i][j]*v[j] for j in range(3)) for i in range(3)]
+
+        def normalize3(v):
+            l = math.sqrt(sum(x*x for x in v))
+            return [x/l for x in v] if l > 1e-8 else [0, 1, 0]
+
+        trace = cov[0][0] + cov[1][1] + cov[2][2]
+        shifted = [[-cov[i][j] + (trace if i==j else 0) for j in range(3)] for i in range(3)]
+
+        vec = [1.0, 0.0, 0.0]
+        for _ in range(32): 
+            vec = mat_vec(shifted, vec)
+            vec = normalize3(vec)
+
+        cam_pos = hou.Vector3(
+            self.scene_viewer.curViewport().viewTransform().extractTranslates()
+        )
+        to_cam = cam_pos - center
+        if sum(vec[i] * to_cam[i] for i in range(3)) < 0:
+            vec = [-x for x in vec]
+
+        return hou.Vector3(vec[0], vec[1], vec[2]).normalized()
 
     def _flush_to_sop(self):
         node = hou.node(STROKE_PATH)
