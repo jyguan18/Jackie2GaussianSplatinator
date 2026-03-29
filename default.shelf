@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<shelfDocument>
+  <!-- This file contains definitions of shelves, toolbars, and tools.
+ It should not be hand-edited when it is being used by the application.
+ Note, that two definitions of the same element are not allowed in
+ a single file. -->
+
+  <toolshelf name="paint_stroke" label="Paint Stroke">
+    <memberTool name="clear_points"/>
+  </toolshelf>
+
+  <tool name="clear_points" label="Clear Points" icon="PLASMA_App">
+    <script scriptType="python"><![CDATA[node = hou.node("/obj/geo1/stroke_points")
+node.parm("point_positions").set("")
+node.parm("point_normals").set("")
+print(hou.node("/obj/geo1/stroke_points").parm("point_positions").evalAsString())
+node.cook(force=True)
+
+import importlib.util
+state_file = r".\viewer_states\gaussian_paint.py"
+try:
+    hou.ui.unregisterViewerState("gaussian_paint")
+except:
+    pass
+spec = importlib.util.spec_from_file_location("gaussian_paint", state_file)
+mod  = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+hou.ui.registerViewerState(mod.createViewerStateTemplate())
+hou.ui.paneTabOfType(hou.paneTabType.SceneViewer).setCurrentState("gaussian_paint")]]></script>
+  </tool>
+</shelfDocument>
