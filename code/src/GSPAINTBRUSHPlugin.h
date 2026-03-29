@@ -72,6 +72,18 @@ private:
     {
         return evalFloat("opacity", 0, t);
 	}
+    fpreal DENSITY(fpreal t)
+    {
+        return evalFloat("density", 0, t);
+    }
+    int PREVIEWMODE(fpreal t)
+    {
+        return evalInt("preview_mode", 0, t);
+    }
+
+    static int onPaintStroke(void* data, int index, fpreal t, const PRM_Template*);
+    static int onClearPoints(void* data, int index, fpreal t, const PRM_Template*);
+
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     /// Member variables are stored in the actual SOP, not with the geometry
