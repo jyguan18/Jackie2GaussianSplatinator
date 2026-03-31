@@ -1,7 +1,7 @@
 import hou
 import viewerstate.utils as su
 
-# CANVAS_PATH = "/obj/canvas_geo"
+CANVAS_PATH = "/obj/canvas_geo" # Default.
 STROKE_PATH = "/obj/geo1/stroke_points"
 
 class GaussianPaintState:
@@ -17,14 +17,15 @@ class GaussianPaintState:
         print(f"[GaussianPaint] Initialized with canvas path: {self.canvas_path}") # Test.
 
     def _raycast(self, mouse_x, mouse_y):
-        if not self.canvas_path:
-            print("[GaussianPaint] No canvas path set — skipping raycast.")
-            return None, None
+        if self.canvas_path:
+            target_path = self.canvas_path
+        else:
+            target_path = CANVAS_PATH
         
         # Checking if we can actually read input 2 for surface input from HDK plugin.
-        canvas = hou.node(self.canvas_path)
+        canvas = hou.node(target_path)
         if canvas is None:
-            print(f"[GaussianPaint] Could not find node: {self.canvas_path}")
+            print(f"[GaussianPaint] Could not find node: {target_path}")
             return None, None
         
         viewport = self.scene_viewer.curViewport()
@@ -38,6 +39,8 @@ class GaussianPaintState:
         if hit >= 0:
             return hou.Vector3(pos), hou.Vector3(norm).normalized()
         
+        if target_path == CANVAS_PATH:
+            return None
         return self._raycast_pointcloud(geo, origin, direction)
 
     def _raycast_pointcloud(self, geo, origin, direction):
