@@ -58,6 +58,7 @@ static PRM_Name names[] = {
 	PRM_Name("scale",  "Scale"),
 	PRM_Name("opacity",  "Opacity"),
 	PRM_Name("density", "Density"),
+	PRM_Name("brush_radius", "Brush Radius"),
 	PRM_Name("preview_mode", "Preview Mode"),
 	PRM_Name("paint_stroke", "Paint Stroke"),
 	PRM_Name("clear_points", "Clear Points"),
@@ -66,11 +67,13 @@ static PRM_Name names[] = {
 static PRM_Default scaleDefault(1.0f);
 static PRM_Default opacityDefault(1.0f);
 static PRM_Default densityDefault(20.0f);
+static PRM_Default brushRadiusDefault(1.0f);
 static PRM_Default buttonDefault(0);
 
 static PRM_Range scaleRange(PRM_RANGE_UI, 0.0f, PRM_RANGE_UI, 10.0f);
 static PRM_Range opacityRange(PRM_RANGE_UI, 0.0f, PRM_RANGE_UI, 1.0f);
 static PRM_Range   densityRange(PRM_RANGE_UI, 1.0f, PRM_RANGE_UI, 100.0f);
+static PRM_Range brushRadiusRange(PRM_RANGE_UI, 0.1f, PRM_RANGE_UI, 50.0f);
 
 PRM_Template
 SOP_GSPaintBrush::myTemplateList[] =
@@ -78,13 +81,21 @@ SOP_GSPaintBrush::myTemplateList[] =
 	PRM_Template(PRM_FLT, 1, &names[0], &scaleDefault, nullptr, &scaleRange),
 	PRM_Template(PRM_FLT, 1, &names[1], &opacityDefault, nullptr, &opacityRange),
 	PRM_Template(PRM_FLT, 1, &names[2], &densityDefault, nullptr, &densityRange),
-	PRM_Template(PRM_TOGGLE, 1, &names[3]),
-	PRM_Template(PRM_CALLBACK, 1, &names[4], &buttonDefault, 0, 0, &SOP_GSPaintBrush::onPaintStroke),
-	PRM_Template(PRM_CALLBACK, 1, &names[5], &buttonDefault, 0, 0, &SOP_GSPaintBrush::onClearPoints),
+	PRM_Template(PRM_FLT, 1, &names[3], &brushRadiusDefault, nullptr, &brushRadiusRange),
+	PRM_Template(PRM_TOGGLE, 1, &names[4]),
+	PRM_Template(PRM_CALLBACK, 1, &names[5], &buttonDefault, 0, 0, &SOP_GSPaintBrush::onPaintStroke),
+	PRM_Template(PRM_CALLBACK, 1, &names[6], &buttonDefault, 0, 0, &SOP_GSPaintBrush::onClearPoints),
 
 	PRM_Template()
 };
 
+// Stroke event enum inspired from CustomBrush.
+enum StrokeEvent { 
+	EVENT_NONE, 
+	EVENT_BEGIN, 
+	EVENT_ACTIVE, 
+	EVENT_END 
+};
 
 // Here's how we define local variables for the SOP.
 enum {
@@ -474,6 +485,25 @@ SOP_GSPaintBrush::cookMySop(OP_Context &context)
 		return error();
 	}
 
+	GA_ROHandleI evt_handle(targetGdp->findIntTuple(GA_ATTRIB_DETAIL, "stroke_event", 1));
+	int strokeEvent = evt_handle.isValid() ? evt_handle.get(GA_DETAIL_OFFSET) : EVENT_ACTIVE;
+
+	if (strokeEvent == EVENT_BEGIN)
+	{
+		// Clear accumulated splats from previous stroke preview.
+		gdp->clearAndDestroy();
+	}
+	else if (strokeEvent == EVENT_ACTIVE)
+	{
+		// Project + stamp as before, but accumulate into gdp rather than rebuild
+		// (merge existing gdp points with new stamps)
+	}
+	else if (strokeEvent == EVENT_END)
+	{
+		const GU_Detail* baseGdp = inputGeo(2, context);
+		if (baseGdp) gdp->merge(*baseGdp);
+	}
+
 	// Normals of points.
 	GA_ROHandleV3 tgt_normal(targetGdp->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
 	GA_ROHandleI  tgt_strokeId(targetGdp->findIntTuple(GA_ATTRIB_POINT, "piece", 1));
@@ -514,6 +544,64 @@ SOP_GSPaintBrush::cookMySop(OP_Context &context)
 		for (auto& sp : spline)
 			allStampSites.append(sp);
 		strokeBoundaries.append(allStampSites.size()); // mark end of this stroke
+	}
+
+	// Take in input 2 and do cone ray test.
+	const GU_Detail* plyGdp = inputGeo(2, context);
+	if (plyGdp && plyGdp->getNumPoints() > 0)
+	{
+		GA_ROHandleV3 ply_N(plyGdp->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
+		float brushRadius = BRUSH_RADIUS(now);
+		float brushRadius2 = brushRadius * brushRadius;
+
+		for (SplinePoint& splinePoint : allStampSites)
+		{
+			UT_Vector3F bestPos = splinePoint.pos;
+			UT_Vector3F bestNorm = splinePoint.norm;
+			float       bestDist = 1e9f;
+
+			// Ray direction: from camera toward stamp site.
+			// Since we don't have camera pos here, use the stroke normal as the cone axis — it points toward camera already.
+			UT_Vector3F rayDir = -splinePoint.norm;
+			if (rayDir.length() < 1e-6f)
+				rayDir = UT_Vector3F(0.f, -1.f, 0.f);
+			rayDir.normalize();
+
+			GA_Offset ptoff;
+			GA_FOR_ALL_PTOFF(plyGdp, ptoff)
+			{
+				UT_Vector3F plyPos = UT_Vector3F(plyGdp->getPos3(ptoff));
+
+				// CustomBrush cone test.
+				UT_Vector3F p = plyPos - splinePoint.pos;
+				float plen = p.length();
+				if (plen < 1e-6f) continue;
+				p /= plen;
+
+				float dot_p_dir = p.dot(rayDir);
+				if (dot_p_dir <= 0.f) continue;
+
+				UT_Vector3F par = dot_p_dir * rayDir;
+				UT_Vector3F perp = p - par;
+				float parlen2 = dot_p_dir * dot_p_dir;
+				if (parlen2 <= 0.f || perp.length2() >= brushRadius2 * parlen2) continue;
+
+				float dist = (plyPos - splinePoint.pos).length();
+				if (dist < bestDist)
+				{
+					bestDist = dist;
+					bestPos = plyPos;
+					if (ply_N.isValid())
+					{
+						UT_Vector3F n = UT_Vector3F(ply_N.get(ptoff));
+						if (n.length() > 1e-6f) bestNorm = n.normalize();
+					}
+				}
+			}
+
+			splinePoint.pos = bestPos;
+			splinePoint.norm = bestNorm;
+		}
 	}
 
 	int previewMode = PREVIEWMODE(now);
@@ -560,7 +648,8 @@ SOP_GSPaintBrush::cookMySop(OP_Context &context)
 	GA_RWHandleV4 out_orientHandle(gdp->addFloatTuple(GA_ATTRIB_POINT, "orient", 4));
 	GA_RWHandleV3 out_scaleHandle(gdp->addFloatTuple(GA_ATTRIB_POINT, "scale", 3));
 
-	// Stamping logic.
+	// New stamping logic.
+	if (strokeEvent != EVENT_BEGIN)
 	{
 		for (const SplinePoint& sp : allStampSites)
 		{
@@ -591,6 +680,38 @@ SOP_GSPaintBrush::cookMySop(OP_Context &context)
 			}
 		}
 	}
+
+	// Stamping logic.
+	/*{
+		for (const SplinePoint& sp : allStampSites)
+		{
+			UT_Vector3F targetNormal = sp.norm;
+			if (targetNormal.length() < 1e-6f) targetNormal = stampUpDir;
+			targetNormal.normalize();
+
+			UT_QuaternionF stampRot = rotationBetween(stampUpDir, targetNormal);
+
+			for (const SplatStamp& s : brushPattern)
+			{
+				UT_Vector3F rotatedOffset = rotateVector(s.localOffset, stampRot);
+				UT_Vector3F worldPos = sp.pos + rotatedOffset;
+
+				GA_Offset newPt = gdp->appendPoint();
+				gdp->setPos3(newPt, UT_Vector3(worldPos));
+
+				out_alphaHandle.set(newPt, s.alpha);
+				out_cdHandle.set(newPt, UT_Vector3(s.cd));
+				out_scaleHandle.set(newPt, UT_Vector3(s.scale));
+
+				UT_QuaternionF splatOrient(
+					s.orient.x(), s.orient.y(), s.orient.z(), s.orient.w());
+				UT_QuaternionF rotatedOrient = multiplyQuat(splatOrient, stampRot);
+				out_orientHandle.set(newPt, UT_Vector4(
+					rotatedOrient.x(), rotatedOrient.y(),
+					rotatedOrient.z(), rotatedOrient.w()));
+			}
+		}
+	}*/
 
 	// merge in base Gaussian scene from input 2 if provided
 	const GU_Detail* baseGdp = inputGeo(2, context);

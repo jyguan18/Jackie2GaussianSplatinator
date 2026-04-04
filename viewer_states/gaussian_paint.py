@@ -14,7 +14,52 @@ class GaussianPaintState:
         self.all_strokes  = []
         self.initialized  = False
         self.canvas_path  = getattr(hou.session, 'gaussian_paint_canvas_path', None) # New, for base surface input from HDK plugin.
+        self.screen_cache = []
         print(f"[GaussianPaint] Initialized with canvas path: {self.canvas_path}") # Test.
+
+    # Instead of raycasting against .ply, find nearest .ply point matching to screenspace location of mouse.
+    def _screen_space_nearest(self, mouse_x, mouse_y):
+        if self.canvas_path:
+            target_path = self.canvas_path
+        else:
+            target_path = CANVAS_PATH
+
+        canvas = hou.node(target_path)
+        if canvas is None:
+            return None, None
+
+        geo      = canvas.displayNode().geometry()
+        viewport = self.scene_viewer.curViewport()
+
+        SCREEN_RADIUS_PX = 50
+
+        best_screen_dist = float('inf')
+        best_pt          = None
+
+        for screen_pos, pt in self.screen_cache:
+            dx = screen_pos[0] - mouse_x
+            dy = screen_pos[1] - mouse_y
+            screen_dist = (dx*dx + dy*dy) ** 0.5
+
+            if screen_dist < SCREEN_RADIUS_PX and screen_dist < best_screen_dist:
+                best_screen_dist = screen_dist
+                best_pt          = pt
+
+        if best_pt is None:
+            return None, None
+
+        best_pos = best_pt.position()
+
+        try:
+            n = hou.Vector3(best_pt.attribValue("N"))
+            if n.length() > 1e-6:
+                return best_pos, n.normalized()
+        except:
+            pass
+        
+        geo  = best_pt.geometry()
+        norm = self._estimate_normal_pca(geo, best_pos, k=8)
+        return best_pos, norm
 
     def _raycast(self, mouse_x, mouse_y):
         if self.canvas_path:
@@ -32,16 +77,18 @@ class GaussianPaintState:
         origin, direction = viewport.mapToWorld(mouse_x, mouse_y)
 
         geo  = canvas.displayNode().geometry()
-        pos  = hou.Vector3()
-        norm = hou.Vector3()
-        uvw  = hou.Vector3()
-        hit  = geo.intersect(hou.Vector3(origin), hou.Vector3(direction), pos, norm, uvw)
-        if hit >= 0:
-            return hou.Vector3(pos), hou.Vector3(norm).normalized()
-        
         if target_path == CANVAS_PATH:
-            return None
-        return self._raycast_pointcloud(geo, origin, direction)
+            viewport = self.scene_viewer.curViewport()
+            origin, direction = viewport.mapToWorld(mouse_x, mouse_y)
+            pos  = hou.Vector3()
+            norm = hou.Vector3()
+            uvw  = hou.Vector3()
+            hit  = geo.intersect(hou.Vector3(origin), hou.Vector3(direction), pos, norm, uvw)
+            if hit >= 0:
+                return hou.Vector3(pos), hou.Vector3(norm).normalized()
+            return None, None
+        
+        return self._screen_space_nearest(mouse_x, mouse_y)
 
     def _raycast_pointcloud(self, geo, origin, direction):
         """
@@ -156,18 +203,23 @@ class GaussianPaintState:
 
         return hou.Vector3(vec[0], vec[1], vec[2]).normalized()
 
-    def _flush_to_sop(self):
+    def _flush_to_sop(self, event="active"):
         node = hou.node(STROKE_PATH)
         if node is None:
             return
-        all_strokes = self.all_strokes + ([self.hit_points] if self.hit_points else [])
-        all_pts = [(p, n) for stroke in all_strokes for p, n in stroke]
+        all_strokes    = self.all_strokes + ([self.hit_points] if self.hit_points else [])
+        all_pts        = [(p, n) for stroke in all_strokes for p, n in stroke]
         stroke_lengths = [len(s) for s in all_strokes]
-        pos_list  = [tuple(p) for p, n in all_pts]
-        norm_list = [tuple(n) for p, n in all_pts]
+        pos_list       = [tuple(p) for p, n in all_pts]
+        norm_list      = [tuple(n) for p, n in all_pts]
+
+        event_map = {"begin": 1, "active": 2, "end": 3}
+        event_int = event_map.get(event, 2)
+
         node.parm("point_positions").set(str(pos_list))
         node.parm("point_normals").set(str(norm_list))
         node.parm("stroke_lengths").set(str(stroke_lengths))
+        node.parm("stroke_event").set(str(event_int))
         node.cook(force=True)
 
     def _check_external_reset(self):
@@ -183,6 +235,13 @@ class GaussianPaintState:
             self.last_pos    = None
             self.is_drawing  = False
 
+    def _cache_screen_positions(self, geo, viewport):
+        self.screen_cache = []
+        for pt in geo.points():
+            screen_pos = viewport.mapToScreen(pt.position())
+            self.screen_cache.append((screen_pos, pt))
+        print(f"[GaussianPaint] Cached {len(self.screen_cache)} screen positions.")
+
     def onMouseEvent(self, kwargs):
         ui_event = kwargs["ui_event"]
         device   = ui_event.device()
@@ -194,13 +253,24 @@ class GaussianPaintState:
             if self.is_drawing:
                 self.is_drawing = False
                 self.last_pos   = None
+                self.screen_cache = []
                 self.all_strokes.append(self.hit_points)
                 self.hit_points = []
-                self._flush_to_sop()
+                self._flush_to_sop(event="end")
                 print(f"[GaussianPaint] Stroke complete. {len(self.all_strokes)} strokes total.")
             return False
 
         self.is_drawing = True
+
+        if len(self.hit_points) == 0:
+            target_path = self.canvas_path if self.canvas_path else CANVAS_PATH
+            canvas      = hou.node(target_path)
+            if canvas is not None and target_path != CANVAS_PATH:
+                geo      = canvas.displayNode().geometry()
+                viewport = self.scene_viewer.curViewport()
+                self._cache_screen_positions(geo, viewport)
+            self._flush_to_sop(event="begin")
+
         pos, norm = self._raycast(device.mouseX(), device.mouseY())
         if pos is None:
             return False
@@ -215,9 +285,12 @@ class GaussianPaintState:
             if (pos - self.last_pos).length() < min_dist:
                 return True
 
+        if len(self.hit_points) == 0:
+            self._flush_to_sop(event="begin")
+
         self.last_pos = pos
         self.hit_points.append((pos, norm))
-        self._flush_to_sop()
+        self._flush_to_sop(event="active") 
         return True
 
     def onExit(self, kwargs):
