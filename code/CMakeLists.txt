@@ -31,6 +31,7 @@ set(SOURCE_FILES
     src/GSPAINTBRUSHPlugin.C
     src/main.cpp
     src/vec.cpp
+    src/MSS_GSPaintState.C
 )
 
 set(HEADER_FILES
@@ -38,6 +39,7 @@ set(HEADER_FILES
     src/GSPAINTBRUSHPlugin.h
     src/matrix.h
     src/vec.h
+    src/MSS_GSPaintState.h
 )
 
 add_library(${PROJECT_NAME} SHARED ${SOURCE_FILES} ${HEADER_FILES})
