@@ -157,6 +157,7 @@ SOP_GSPaintBrush::SOP_GSPaintBrush(OP_Network* net, const char* name, OP_Operato
     : SOP_Node(net, name, op)
 {
     myCurrPoint = -1;
+    myLastProcessedStrokeSize = 0;
 }
 
 SOP_GSPaintBrush::~SOP_GSPaintBrush() {}
@@ -286,13 +287,10 @@ SOP_GSPaintBrush::onClearPoints(void* data, int index, fpreal t,
     return 1;
 }
 
-// ── cookMySop ────────────────────────────────────────────────────────────────
-
 OP_ERROR
 SOP_GSPaintBrush::cookMySop(OP_Context& context)
 {
     fpreal now = context.getTime();
-
     if (lockInputs(context) >= UT_ERROR_ABORT)
         return error();
 
@@ -300,288 +298,325 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
 
     int operation = OPERATION(now);
 
-    // ── PAINT MODE ───────────────────────────────────────────────────────────────
-    if (operation == 1)
+    // ── get base scene ────────────────────────────────────────────────────
+    const GU_Detail* baseGdp = inputGeo(2, context);
+
+    // ── get current stroke points ─────────────────────────────────────────
+    const GU_Detail* targetGdp = inputGeo(1, context);
+
+    // ── process NEW stroke points since last cook ─────────────────────────
+    if (targetGdp && targetGdp->getNumPoints() > myLastProcessedStrokeSize)
     {
-        // Input 2 is the base Gaussian scene we're painting on
-        const GU_Detail* baseGdp = inputGeo(2, context);
-        if (!baseGdp)
-        {
-            addError(SOP_MESSAGE, "Paint mode requires Input 2: base Gaussian scene.");
-            unlockInputs(); return error();
-        }
-
-        // duplicate base scene into output
-        gdp->merge(*baseGdp);
-
-        // read stroke points from Input 1
-        const GU_Detail* targetGdp = inputGeo(1, context);
-        if (!targetGdp || targetGdp->getNumPoints() == 0)
-        {
-            unlockInputs(); return error(); // no stroke yet, just output base
-        }
-
         float brushRadius = BRUSH_RADIUS(now);
-        float paintAlpha = PAINTALPHA(now);
-        int   colorSource = COLORSOURCE(now);
-        bool  modifyCd = PAINTCD(now);
-        bool  modifyAlpha = PAINTALPHA2(now);
-        bool  modifyScale = PAINTSCALE(now);
+        float radius2 = brushRadius * brushRadius;
 
-        UT_Vector3F paintColor(PAINTCOLOR(now));
-
-        // get stroke positions
-        UT_Array<UT_Vector3F> strokePositions;
+        // collect only NEW stroke positions
+        UT_Array<UT_Vector3F> newStrokePositions;
+        int idx = 0;
+        GA_Offset ptoff;
+        GA_FOR_ALL_PTOFF(targetGdp, ptoff)
         {
-            GA_Offset ptoff;
-            GA_FOR_ALL_PTOFF(targetGdp, ptoff)
-                strokePositions.append(UT_Vector3F(targetGdp->getPos3(ptoff)));
+            if (idx >= myLastProcessedStrokeSize)
+                newStrokePositions.append(UT_Vector3F(targetGdp->getPos3(ptoff)));
+            idx++;
         }
+        myLastProcessedStrokeSize = targetGdp->getNumPoints();
 
-        // get stamp color if using stamp source
-        UT_Vector3F stampColor(1, 1, 1);
-        if (colorSource == 1) // sample from stamp
+        if (operation == 0 && baseGdp) // stamp mode
         {
-            const GU_Detail* stampGdp = inputGeo(0, context);
-            if (stampGdp && stampGdp->getNumPoints() > 0)
+            const GU_Detail* splatsGdp = inputGeo(0, context);
+            if (splatsGdp && splatsGdp->getNumPoints() > 0)
             {
-                GA_ROHandleV3 stampCd(stampGdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
-                if (stampCd.isValid())
+                // read brush stamp
+                struct SplatStamp {
+                    UT_Vector3F localOffset;
+                    float       alpha;
+                    UT_Vector3F cd;
+                    UT_Vector4F orient;
+                    UT_Vector3F scale;
+                };
+
+                float brushScale = SCALE(now);
+                float brushOpacity = OPACITY(now);
+
+                GA_ROHandleV3 src_cd(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
+                GA_ROHandleF  src_alpha(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
+                GA_ROHandleV4 src_orient(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
+                GA_ROHandleV3 src_scale(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
+
+                // compute centroid
+                UT_Vector3F centroid(0, 0, 0);
+                int npts = splatsGdp->getNumPoints();
                 {
-                    // average color from stamp
-                    UT_Vector3F total(0, 0, 0);
-                    int count = 0;
                     GA_Offset ptoff;
-                    GA_FOR_ALL_PTOFF(stampGdp, ptoff)
+                    GA_FOR_ALL_PTOFF(splatsGdp, ptoff)
+                        centroid += UT_Vector3F(splatsGdp->getPos3(ptoff));
+                }
+                centroid /= (float)npts;
+
+                // build brush pattern
+                UT_Array<SplatStamp> brushPattern;
+                {
+                    GA_Offset ptoff;
+                    GA_FOR_ALL_PTOFF(splatsGdp, ptoff)
                     {
-                        total += UT_Vector3F(stampCd.get(ptoff));
-                        count++;
+                        SplatStamp s;
+                        s.localOffset = UT_Vector3F(splatsGdp->getPos3(ptoff)) - centroid;
+                        s.alpha = src_alpha.isValid()
+                            ? SYSclamp(src_alpha.get(ptoff) * brushOpacity, 0.f, 1.f) : 1.f;
+                        if (src_scale.isValid())
+                        {
+                            UT_Vector3F sc = src_scale.get(ptoff);
+                            float ld = SYSlog(SYSmax(brushScale, 1e-6f));
+                            sc.x() += ld; sc.y() += ld; sc.z() += ld; s.scale = sc;
+                        }
+                        else s.scale = UT_Vector3F(0, 0, 0);
+                        s.orient = src_orient.isValid()
+                            ? UT_Vector4F(src_orient.get(ptoff)) : UT_Vector4F(0, 0, 0, 1);
+                        s.cd = src_cd.isValid()
+                            ? UT_Vector3F(src_cd.get(ptoff)) : UT_Vector3F(1, 1, 1);
+                        brushPattern.append(s);
                     }
-                    if (count > 0) stampColor = total / (float)count;
+                }
+
+                // build spline from ALL stroke points
+                GA_ROHandleV3 tgt_normal(targetGdp->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
+                GA_ROHandleI  tgt_strokeId(targetGdp->findIntTuple(GA_ATTRIB_POINT, "piece", 1));
+
+                std::map<int, UT_Array<UT_Vector3F>> strokePts, strokeNorms;
+                const UT_Vector3F stampUpDir(0, 1, 0);
+                {
+                    GA_Offset ptoff;
+                    GA_FOR_ALL_PTOFF(targetGdp, ptoff)
+                    {
+                        int piece = tgt_strokeId.isValid() ? tgt_strokeId.get(ptoff) : 0;
+                        UT_Vector3F pos = targetGdp->getPos3(ptoff);
+                        UT_Vector3F norm = stampUpDir;
+                        if (tgt_normal.isValid())
+                        {
+                            UT_Vector3F n = tgt_normal.get(ptoff);
+                            if (n.length() > 1e-6f) { n.normalize(); norm = n; }
+                        }
+                        strokePts[piece].append(pos);
+                        strokeNorms[piece].append(norm);
+                    }
+                }
+
+                // rebuild stamp sites from scratch and repopulate myStampedGaussians
+                myStampedGaussians.clear();
+                float density = DENSITY(now);
+
+                for (auto& kv : strokePts)
+                {
+                    int piece = kv.first;
+                    auto spline = buildSpline(strokePts[piece], strokeNorms[piece], density);
+
+                    for (const SplinePoint& sp : spline)
+                    {
+                        UT_Vector3F targetNormal = sp.norm;
+                        if (targetNormal.length() < 1e-6f) targetNormal = stampUpDir;
+                        targetNormal.normalize();
+                        UT_QuaternionF stampRot = rotationBetween(stampUpDir, targetNormal);
+
+                        for (const SplatStamp& s : brushPattern)
+                        {
+                            GaussianAttribs a;
+                            a.pos = sp.pos + rotateVector(s.localOffset, stampRot);
+                            a.cd = s.cd;
+                            a.alpha = s.alpha;
+                            a.scale = s.scale;
+
+                            UT_QuaternionF splatOrient(s.orient.x(), s.orient.y(),
+                                s.orient.z(), s.orient.w());
+                            UT_QuaternionF rotated = multiplyQuat(splatOrient, stampRot);
+                            a.orient = UT_Vector4F(rotated.x(), rotated.y(),
+                                rotated.z(), rotated.w());
+                            myStampedGaussians.append(a);
+                        }
+                    }
                 }
             }
         }
-
-        UT_Vector3F finalColor = (colorSource == 0) ? paintColor : stampColor;
-
-        // find output geometry handles
-        GA_RWHandleV3 out_cd(gdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
-        GA_RWHandleF  out_alpha(gdp->findFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
-        GA_RWHandleV3 out_scale(gdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
-
-        // for each output Gaussian, check if it's within brush radius of any stroke point
-        float radius2 = brushRadius * brushRadius;
+        else if (operation == 1 && baseGdp) // paint mode
         {
-            GA_Offset ptoff;
-            GA_FOR_ALL_PTOFF(gdp, ptoff)
-            {
-                UT_Vector3F pos = UT_Vector3F(gdp->getPos3(ptoff));
+            float paintAlpha = PAINTALPHA(now);
+            int   colorSource = COLORSOURCE(now);
+            bool  modifyCd = PAINTCD(now);
+            bool  modifyAlpha = PAINTALPHA2(now);
+            bool  modifyScale = PAINTSCALE(now);
+            UT_Vector3F paintColor(PAINTCOLOR(now));
 
-                // find closest stroke point
+            // for each base Gaussian near new stroke points, update myPaintedAttribs
+            GA_Offset bptoff;
+            GA_ROHandleV3 src_cd(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
+            GA_ROHandleF  src_alpha(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
+            GA_ROHandleV3 src_scale(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
+
+            GA_FOR_ALL_PTOFF(baseGdp, bptoff)
+            {
+                UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(bptoff));
                 float minDist2 = 1e10f;
-                for (const UT_Vector3F& sp : strokePositions)
+                for (const UT_Vector3F& sp : newStrokePositions)
                 {
                     float d2 = (pos - sp).length2();
                     if (d2 < minDist2) minDist2 = d2;
                 }
+                if (minDist2 > radius2) continue;
 
-                if (minDist2 > radius2) continue; // outside brush radius
-
-                // blend factor based on distance (soft falloff)
                 float dist = SYSsqrt(minDist2);
                 float falloff = 1.0f - (dist / brushRadius);
                 float blend = paintAlpha * falloff;
                 float inv = 1.0f - blend;
 
-                // modify color
-                if (modifyCd && out_cd.isValid())
+                GA_Index ptnum = baseGdp->pointIndex(bptoff);
+
+                // check if already painted
+                auto it = myPaintedAttribs.find(ptnum);
+                if (it == myPaintedAttribs.end())
                 {
-                    UT_Vector3F current = out_cd.get(ptoff);
-                    out_cd.set(ptoff, current * inv + finalColor * blend);
+                    // first time painting this point — initialize from base
+                    GaussianAttribs newAttribs;
+                    newAttribs.cd = src_cd.isValid() ? UT_Vector3F(src_cd.get(bptoff)) : UT_Vector3F(1, 1, 1);
+                    newAttribs.alpha = src_alpha.isValid() ? src_alpha.get(bptoff) : 1.f;
+                    newAttribs.scale = src_scale.isValid() ? UT_Vector3F(src_scale.get(bptoff)) : UT_Vector3F(0, 0, 0);
+                    myPaintedAttribs[ptnum] = newAttribs;
+                    it = myPaintedAttribs.find(ptnum);
                 }
 
-                // modify alpha
-                if (modifyAlpha && out_alpha.isValid())
-                {
-                    float current = out_alpha.get(ptoff);
-                    out_alpha.set(ptoff, current * inv + blend);
-                }
-
-                // modify scale (shrink/grow based on opacity)
-                if (modifyScale && out_scale.isValid())
-                {
-                    UT_Vector3F current = out_scale.get(ptoff);
-                    // scale in log space like stamp mode
-                    float logDelta = SYSlog(SYSmax(SCALE(now), 1e-6f)) * blend;
-                    current.x() += logDelta;
-                    current.y() += logDelta;
-                    current.z() += logDelta;
-                    out_scale.set(ptoff, current);
-                }
+                GaussianAttribs& attribs = it->second;
+                if (modifyCd)
+                    attribs.cd = attribs.cd * inv + paintColor * blend;
+                if (modifyAlpha)
+                    attribs.alpha = attribs.alpha * inv + blend;
             }
         }
+        else if (operation == 2 && baseGdp) // erase mode
+        {
+            float radius2 = brushRadius * brushRadius;
 
-        unlockInputs();
-        return error();
+            // erase from base scene
+            //GA_Offset bptoff;
+            //GA_FOR_ALL_PTOFF(baseGdp, bptoff)
+            //{
+            //    UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(bptoff));
+            //    for (const UT_Vector3F& sp : newStrokePositions)
+            //    {
+            //        if ((pos - sp).length2() <= radius2)
+            //        {
+            //            myErasedPoints.insert(baseGdp->pointIndex(bptoff));
+            //            break;
+            //        }
+            //    }
+            //}
+
+            // also erase stamps within brush radius
+            UT_Array<GaussianAttribs> survivingStamps;
+            for (const GaussianAttribs& a : myStampedGaussians)
+            {
+                bool erased = false;
+                for (const UT_Vector3F& sp : newStrokePositions)
+                {
+                    if ((a.pos - sp).length2() <= radius2)
+                    {
+                        erased = true;
+                        break;
+                    }
+                }
+                if (!erased) survivingStamps.append(a);
+            }
+            myStampedGaussians = survivingStamps;
+
+            // also remove paint modifications within brush radius
+            UT_Array<GA_Index> toRemove;
+            for (auto& kv : myPaintedAttribs)
+            {
+                GA_Offset ptoff = baseGdp->pointOffset(kv.first);
+                UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(ptoff));
+                for (const UT_Vector3F& sp : newStrokePositions)
+                {
+                    if ((pos - sp).length2() <= radius2)
+                    {
+                        toRemove.append(kv.first);
+                        break;
+                    }
+                }
+            }
+            for (GA_Index idx : toRemove)
+                myPaintedAttribs.erase(idx);
+                }
+    }
+    else if (targetGdp && targetGdp->getNumPoints() == 0)
+    {
+        // stroke was cleared externally — reset all accumulated state
+        myStampedGaussians.clear();
+        myPaintedAttribs.clear();
+        myErasedPoints.clear();
+        myLastProcessedStrokeSize = 0;
     }
 
-    // ── read brush stamp from Input 0 ────────────────────────────────────────
-    struct SplatStamp {
-        UT_Vector3 localOffset;
-        float      alpha;
-        UT_Vector3 cd;
-        UT_Vector4 orient;
-        UT_Vector3 scale;
-    };
+    // ── build output ──────────────────────────────────────────────────────
 
-    float brushScale = SCALE(now);
-    float brushOpacity = OPACITY(now);
+    GA_RWHandleV3 out_cd(gdp->addFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
+    GA_RWHandleF  out_alpha(gdp->addFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
+    GA_RWHandleV4 out_orient(gdp->addFloatTuple(GA_ATTRIB_POINT, "orient", 4));
+    GA_RWHandleV3 out_scale(gdp->addFloatTuple(GA_ATTRIB_POINT, "scale", 3));
 
-    const GU_Detail* splatsGdp = inputGeo(0, context);
-    if (!splatsGdp)
+    // 1. output base scene with paint modifications and erases applied
+    if (baseGdp)
     {
-        addError(SOP_MESSAGE, "Missing input 0: Gaussian splat cloud.");
-        unlockInputs(); return error();
-    }
+        GA_ROHandleV3 src_cd(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
+        GA_ROHandleF  src_alpha(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
+        GA_ROHandleV4 src_orient(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
+        GA_ROHandleV3 src_scale(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
 
-    GA_ROHandleV3 src_cdHandle(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
-    GA_ROHandleF  src_alphaHandle(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
-    GA_ROHandleV4 src_orientHandle(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
-    GA_ROHandleV3 src_scaleHandle(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
-
-    UT_Vector3F stampCentroid(0, 0, 0);
-    int numSplatPts = splatsGdp->getNumPoints();
-    {
-        GA_Offset ptoff; GA_FOR_ALL_PTOFF(splatsGdp, ptoff)
-            stampCentroid += UT_Vector3F(splatsGdp->getPos3(ptoff));
-    }
-    stampCentroid /= (float)numSplatPts;
-
-    UT_Array<SplatStamp> brushPattern;
-    brushPattern.setCapacity(numSplatPts);
-    {
         GA_Offset ptoff;
-        GA_FOR_ALL_PTOFF(splatsGdp, ptoff)
+        GA_FOR_ALL_PTOFF(baseGdp, ptoff)
         {
-            SplatStamp s;
-            s.localOffset = UT_Vector3F(splatsGdp->getPos3(ptoff)) - stampCentroid;
-            s.alpha = src_alphaHandle.isValid()
-                ? SYSclamp(src_alphaHandle.get(ptoff) * brushOpacity, 0.f, 1.f) : 1.f;
-            if (src_scaleHandle.isValid())
-            {
-                UT_Vector3F sc = src_scaleHandle.get(ptoff);
-                float ld = SYSlog(SYSmax(brushScale, 1e-6f));
-                sc.x() += ld; sc.y() += ld; sc.z() += ld; s.scale = sc;
-            }
-            else s.scale = UT_Vector3(0, 0, 0);
-            s.orient = src_orientHandle.isValid()
-                ? UT_Vector4F(src_orientHandle.get(ptoff))
-                : UT_Vector4F(0, 0, 0, 1);
-            s.cd = src_cdHandle.isValid()
-                ? src_cdHandle.get(ptoff) : UT_Vector3(1, 1, 1);
-            brushPattern.append(s);
-        }
-    }
+            GA_Index ptnum = baseGdp->pointIndex(ptoff);
 
-    // ── read stroke points from Input 1 ──────────────────────────────────────
-    const GU_Detail* targetGdp = inputGeo(1, context);
-    if (!targetGdp)
-    {
-        addError(SOP_MESSAGE, "Missing input 1: stamp target points.");
-        unlockInputs(); return error();
-    }
+            // skip erased points
+            if (myErasedPoints.count(ptnum)) continue;
 
-    GA_ROHandleV3 tgt_normal(targetGdp->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
-    GA_ROHandleI  tgt_strokeId(targetGdp->findIntTuple(GA_ATTRIB_POINT, "piece", 1));
-
-    float density = DENSITY(now);
-    const UT_Vector3F stampUpDir(0, 1, 0);
-
-    std::map<int, UT_Array<UT_Vector3F>> strokePts, strokeNorms;
-    {
-        GA_Offset ptoff;
-        GA_FOR_ALL_PTOFF(targetGdp, ptoff)
-        {
-            int piece = tgt_strokeId.isValid() ? tgt_strokeId.get(ptoff) : 0;
-            UT_Vector3F pos = targetGdp->getPos3(ptoff);
-            UT_Vector3F norm = stampUpDir;
-            if (tgt_normal.isValid())
-            {
-                UT_Vector3F n = tgt_normal.get(ptoff);
-                if (n.length() > 1e-6f) { n.normalize(); norm = n; }
-            }
-            strokePts[piece].append(pos);
-            strokeNorms[piece].append(norm);
-        }
-    }
-
-    UT_Array<SplinePoint> allStampSites;
-    UT_Array<int> strokeBoundaries; strokeBoundaries.append(0);
-    for (auto& kv : strokePts)
-    {
-        int piece = kv.first;
-        auto spline = buildSpline(strokePts[piece], strokeNorms[piece], density);
-        for (auto& sp : spline) allStampSites.append(sp);
-        strokeBoundaries.append(allStampSites.size());
-    }
-
-    // ── preview mode ─────────────────────────────────────────────────────────
-    if (PREVIEWMODE(now))
-    {
-        GA_RWHandleV3 preview_cd(gdp->addFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
-        for (int s = 0; s < strokeBoundaries.size() - 1; s++)
-        {
-            int start = strokeBoundaries[s], end = strokeBoundaries[s + 1];
-            UT_Array<GA_Offset> ptOffsets;
-            for (int i = start; i < end; i++)
-            {
-                GA_Offset newPt = gdp->appendPoint();
-                gdp->setPos3(newPt, UT_Vector3(allStampSites[i].pos));
-                if (preview_cd.isValid())
-                    preview_cd.set(newPt, UT_Vector3(1.f, 0.5f, 0.f));
-                ptOffsets.append(newPt);
-            }
-            GU_PrimPoly* poly = GU_PrimPoly::build(gdp, 0, GU_POLY_OPEN, 0);
-            for (GA_Offset off : ptOffsets) poly->appendVertex(off);
-        }
-        const GU_Detail* baseGdp = inputGeo(2, context);
-        if (baseGdp) gdp->merge(*baseGdp);
-        unlockInputs(); return error();
-    }
-
-    // ── stamp instancing ─────────────────────────────────────────────────────
-    GA_RWHandleV3 out_cdHandle(gdp->addFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
-    GA_RWHandleF  out_alphaHandle(gdp->addFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
-    GA_RWHandleV4 out_orientHandle(gdp->addFloatTuple(GA_ATTRIB_POINT, "orient", 4));
-    GA_RWHandleV3 out_scaleHandle(gdp->addFloatTuple(GA_ATTRIB_POINT, "scale", 3));
-
-    for (const SplinePoint& sp : allStampSites)
-    {
-        UT_Vector3F targetNormal = sp.norm;
-        if (targetNormal.length() < 1e-6f) targetNormal = stampUpDir;
-        targetNormal.normalize();
-        UT_QuaternionF stampRot = rotationBetween(stampUpDir, targetNormal);
-
-        for (const SplatStamp& s : brushPattern)
-        {
-            UT_Vector3F worldPos = sp.pos + rotateVector(s.localOffset, stampRot);
             GA_Offset newPt = gdp->appendPoint();
-            gdp->setPos3(newPt, UT_Vector3(worldPos));
-            out_alphaHandle.set(newPt, s.alpha);
-            out_cdHandle.set(newPt, UT_Vector3(s.cd));
-            out_scaleHandle.set(newPt, UT_Vector3(s.scale));
-            UT_QuaternionF splatOrient(s.orient.x(), s.orient.y(),
-                s.orient.z(), s.orient.w());
-            UT_QuaternionF rotatedOrient = multiplyQuat(splatOrient, stampRot);
-            out_orientHandle.set(newPt, UT_Vector4(
-                rotatedOrient.x(), rotatedOrient.y(),
-                rotatedOrient.z(), rotatedOrient.w()));
+            gdp->setPos3(newPt, baseGdp->getPos3(ptoff));
+
+            // check if this point has paint modifications
+            auto it = myPaintedAttribs.find(ptnum);
+            if (it != myPaintedAttribs.end())
+            {
+                const GaussianAttribs& a = it->second;
+                if (out_cd.isValid())    out_cd.set(newPt, UT_Vector3(a.cd));
+                if (out_alpha.isValid()) out_alpha.set(newPt, a.alpha);
+                if (src_orient.isValid() && out_orient.isValid())
+                    out_orient.set(newPt, src_orient.get(ptoff));
+                if (src_scale.isValid() && out_scale.isValid())
+                    out_scale.set(newPt, src_scale.get(ptoff));
+            }
+            else
+            {
+                // copy original attributes
+                if (out_cd.isValid() && src_cd.isValid())
+                    out_cd.set(newPt, src_cd.get(ptoff));
+                if (out_alpha.isValid() && src_alpha.isValid())
+                    out_alpha.set(newPt, src_alpha.get(ptoff));
+                if (out_orient.isValid() && src_orient.isValid())
+                    out_orient.set(newPt, src_orient.get(ptoff));
+                if (out_scale.isValid() && src_scale.isValid())
+                    out_scale.set(newPt, src_scale.get(ptoff));
+            }
         }
     }
 
-    // ── merge base scene ─────────────────────────────────────────────────────
-    const GU_Detail* baseGdp = inputGeo(2, context);
-    if (baseGdp) gdp->merge(*baseGdp);
+    // 2. output accumulated stamps on top
+    for (const GaussianAttribs& a : myStampedGaussians)
+    {
+        GA_Offset newPt = gdp->appendPoint();
+        gdp->setPos3(newPt, UT_Vector3(a.pos));
+        if (out_cd.isValid())     out_cd.set(newPt, UT_Vector3(a.cd));
+        if (out_alpha.isValid())  out_alpha.set(newPt, a.alpha);
+        if (out_orient.isValid()) out_orient.set(newPt, UT_Vector4(a.orient));
+        if (out_scale.isValid())  out_scale.set(newPt, UT_Vector3(a.scale));
+    }
 
     unlockInputs();
     return error();

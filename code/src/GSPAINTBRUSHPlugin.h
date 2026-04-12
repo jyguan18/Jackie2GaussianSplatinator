@@ -3,6 +3,10 @@
 
 #include <SOP/SOP_Node.h>
 #include "GSPaintBrush.h"
+#include <UT/UT_Map.h>
+#include <UT/UT_Set.h>
+#include <UT/UT_Array.h>
+#include <GA/GA_Types.h>
 
 namespace HDK_Sample {
     class SOP_GSPaintBrush : public SOP_Node
@@ -61,6 +65,27 @@ namespace HDK_Sample {
         }
 
         static int onClearPoints(void* data, int index, fpreal t, const PRM_Template*);
+
+        // persistent accumulated state
+        struct GaussianAttribs {
+            UT_Vector3F cd;
+            float       alpha;
+            UT_Vector3F scale;
+            UT_Vector4F orient;
+            UT_Vector3F pos;
+        };
+
+        // stamp mode: accumulated stamped Gaussians
+        UT_Array<GaussianAttribs> myStampedGaussians;
+
+        // paint mode: per-point color overrides (keyed by point index in base scene)
+        UT_Map<GA_Index, GaussianAttribs> myPaintedAttribs;
+
+        // erase mode: set of erased point indices from base scene
+        UT_Set<GA_Index> myErasedPoints;
+
+        // track last processed stroke length to avoid reprocessing
+        int myLastProcessedStrokeSize;
 
         int  myCurrPoint;
         int  myTotalPoints;
