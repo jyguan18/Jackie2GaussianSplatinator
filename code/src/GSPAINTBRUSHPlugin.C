@@ -16,6 +16,7 @@
 #include <limits.h>
 #include <map>
 #include "GSPAINTBRUSHPlugin.h"
+#include <CH/CH_Manager.h>
 
 using namespace HDK_Sample;
 
@@ -46,6 +47,13 @@ static PRM_Name names[] = {
     PRM_Name("direction",    "Direction"),
     PRM_Name("event",        "Event"),
     PRM_Name("clear_points", "Clear Points"),
+    PRM_Name("operation",     "Operation"),
+    PRM_Name("paint_color",   "Paint Color"),
+    PRM_Name("paint_alpha",   "Paint Alpha"),
+    PRM_Name("color_source",  "Color Source"),
+    PRM_Name("paint_cd",      "Modify Color"),
+    PRM_Name("paint_alpha_on","Modify Alpha"),
+    PRM_Name("paint_scale",   "Modify Scale"),
 };
 
 static PRM_Default scaleDefault(1.0f);
@@ -58,6 +66,31 @@ static PRM_Range scaleRange(PRM_RANGE_UI, 0.0f, PRM_RANGE_UI, 10.0f);
 static PRM_Range opacityRange(PRM_RANGE_UI, 0.0f, PRM_RANGE_UI, 1.0f);
 static PRM_Range densityRange(PRM_RANGE_UI, 1.0f, PRM_RANGE_UI, 100.0f);
 static PRM_Range brushRadiusRange(PRM_RANGE_UI, 0.01f, PRM_RANGE_UI, 5.0f);
+
+// operation menu
+static PRM_Name operationMenuNames[] = {
+    PRM_Name("stamp", "Stamp"),
+    PRM_Name("paint", "Paint"),
+    PRM_Name("erase", "Erase"),
+    PRM_Name(0)
+};
+static PRM_ChoiceList operationMenu(PRM_CHOICELIST_SINGLE, operationMenuNames);
+static PRM_Default    operationDefault(0); // stamp
+
+// color source menu
+static PRM_Name colorSourceMenuNames[] = {
+    PRM_Name("picker", "Color Picker"),
+    PRM_Name("stamp",  "Sample from Stamp"),
+    PRM_Name(0)
+};
+static PRM_ChoiceList colorSourceMenu(PRM_CHOICELIST_SINGLE, colorSourceMenuNames);
+static PRM_Default    colorSourceDefault(0); // picker
+
+// paint defaults
+static PRM_Default paintAlphaDefault(0.5f);
+static PRM_Default paintColorDefault[] = {
+    PRM_Default(1.0f), PRM_Default(0.0f), PRM_Default(0.0f)
+};
 
 // event menu
 static PRM_Name eventMenuNames[] = {
@@ -77,11 +110,14 @@ SOP_GSPaintBrush::myTemplateList[] =
     PRM_Template(PRM_FLT,    1, &names[1], &opacityDefault,     nullptr, &opacityRange),
     PRM_Template(PRM_FLT,    1, &names[2], &densityDefault,     nullptr, &densityRange),
     PRM_Template(PRM_FLT,    1, &names[3], &brushRadiusDefault, nullptr, &brushRadiusRange),
-    PRM_Template(PRM_TOGGLE, 1, &names[4]),
-    PRM_Template(PRM_TOGGLE, 1, &names[5]),
-    PRM_Template(PRM_XYZ_J,  3, &names[6]),  // origin
-    PRM_Template(PRM_XYZ_J,  3, &names[7]),  // direction
-    PRM_Template(PRM_ORD,    1, &names[8], &eventDefault, &eventMenu), // event
+    PRM_Template(PRM_ORD,      1, &names[10], &operationDefault,   &operationMenu),
+    PRM_Template(PRM_RGB_J,    3, &names[11], paintColorDefault),
+    PRM_Template(PRM_FLT,      1, &names[12], &paintAlphaDefault,  nullptr, &opacityRange),
+    PRM_Template(PRM_ORD,      1, &names[13], &colorSourceDefault, &colorSourceMenu),
+    PRM_Template(PRM_TOGGLE,   1, &names[14]),  // modify color
+    PRM_Template(PRM_TOGGLE,   1, &names[15]),  // modify alpha
+    PRM_Template(PRM_TOGGLE,   1, &names[16]),  // modify scale
+    PRM_Template(PRM_TOGGLE,   1, &names[4]),   // preview mode
     PRM_Template(PRM_CALLBACK, 1, &names[9], &buttonDefault, 0, 0,
                  &SOP_GSPaintBrush::onClearPoints),
     PRM_Template()
@@ -128,6 +164,22 @@ SOP_GSPaintBrush::~SOP_GSPaintBrush() {}
 unsigned
 SOP_GSPaintBrush::disableParms()
 {
+    fpreal t = CHgetEvalTime();
+    int operation = OPERATION(t);
+    bool isPaint = (operation == 1);
+
+    // disable paint-only params when not in paint mode
+    enableParm("paint_color", isPaint);
+    enableParm("paint_alpha", isPaint);
+    enableParm("color_source", isPaint);
+    enableParm("paint_cd", isPaint);
+    enableParm("paint_alpha_on", isPaint);
+    enableParm("paint_scale", isPaint);
+
+    // disable stamp-only params when in paint mode
+    enableParm("density", !isPaint);
+    enableParm("preview_mode", !isPaint);
+
     return 0;
 }
 
@@ -245,6 +297,133 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
         return error();
 
     gdp->clearAndDestroy();
+
+    int operation = OPERATION(now);
+
+    // ── PAINT MODE ───────────────────────────────────────────────────────────────
+    if (operation == 1)
+    {
+        // Input 2 is the base Gaussian scene we're painting on
+        const GU_Detail* baseGdp = inputGeo(2, context);
+        if (!baseGdp)
+        {
+            addError(SOP_MESSAGE, "Paint mode requires Input 2: base Gaussian scene.");
+            unlockInputs(); return error();
+        }
+
+        // duplicate base scene into output
+        gdp->merge(*baseGdp);
+
+        // read stroke points from Input 1
+        const GU_Detail* targetGdp = inputGeo(1, context);
+        if (!targetGdp || targetGdp->getNumPoints() == 0)
+        {
+            unlockInputs(); return error(); // no stroke yet, just output base
+        }
+
+        float brushRadius = BRUSH_RADIUS(now);
+        float paintAlpha = PAINTALPHA(now);
+        int   colorSource = COLORSOURCE(now);
+        bool  modifyCd = PAINTCD(now);
+        bool  modifyAlpha = PAINTALPHA2(now);
+        bool  modifyScale = PAINTSCALE(now);
+
+        UT_Vector3F paintColor(PAINTCOLOR(now));
+
+        // get stroke positions
+        UT_Array<UT_Vector3F> strokePositions;
+        {
+            GA_Offset ptoff;
+            GA_FOR_ALL_PTOFF(targetGdp, ptoff)
+                strokePositions.append(UT_Vector3F(targetGdp->getPos3(ptoff)));
+        }
+
+        // get stamp color if using stamp source
+        UT_Vector3F stampColor(1, 1, 1);
+        if (colorSource == 1) // sample from stamp
+        {
+            const GU_Detail* stampGdp = inputGeo(0, context);
+            if (stampGdp && stampGdp->getNumPoints() > 0)
+            {
+                GA_ROHandleV3 stampCd(stampGdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
+                if (stampCd.isValid())
+                {
+                    // average color from stamp
+                    UT_Vector3F total(0, 0, 0);
+                    int count = 0;
+                    GA_Offset ptoff;
+                    GA_FOR_ALL_PTOFF(stampGdp, ptoff)
+                    {
+                        total += UT_Vector3F(stampCd.get(ptoff));
+                        count++;
+                    }
+                    if (count > 0) stampColor = total / (float)count;
+                }
+            }
+        }
+
+        UT_Vector3F finalColor = (colorSource == 0) ? paintColor : stampColor;
+
+        // find output geometry handles
+        GA_RWHandleV3 out_cd(gdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
+        GA_RWHandleF  out_alpha(gdp->findFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
+        GA_RWHandleV3 out_scale(gdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
+
+        // for each output Gaussian, check if it's within brush radius of any stroke point
+        float radius2 = brushRadius * brushRadius;
+        {
+            GA_Offset ptoff;
+            GA_FOR_ALL_PTOFF(gdp, ptoff)
+            {
+                UT_Vector3F pos = UT_Vector3F(gdp->getPos3(ptoff));
+
+                // find closest stroke point
+                float minDist2 = 1e10f;
+                for (const UT_Vector3F& sp : strokePositions)
+                {
+                    float d2 = (pos - sp).length2();
+                    if (d2 < minDist2) minDist2 = d2;
+                }
+
+                if (minDist2 > radius2) continue; // outside brush radius
+
+                // blend factor based on distance (soft falloff)
+                float dist = SYSsqrt(minDist2);
+                float falloff = 1.0f - (dist / brushRadius);
+                float blend = paintAlpha * falloff;
+                float inv = 1.0f - blend;
+
+                // modify color
+                if (modifyCd && out_cd.isValid())
+                {
+                    UT_Vector3F current = out_cd.get(ptoff);
+                    out_cd.set(ptoff, current * inv + finalColor * blend);
+                }
+
+                // modify alpha
+                if (modifyAlpha && out_alpha.isValid())
+                {
+                    float current = out_alpha.get(ptoff);
+                    out_alpha.set(ptoff, current * inv + blend);
+                }
+
+                // modify scale (shrink/grow based on opacity)
+                if (modifyScale && out_scale.isValid())
+                {
+                    UT_Vector3F current = out_scale.get(ptoff);
+                    // scale in log space like stamp mode
+                    float logDelta = SYSlog(SYSmax(SCALE(now), 1e-6f)) * blend;
+                    current.x() += logDelta;
+                    current.y() += logDelta;
+                    current.z() += logDelta;
+                    out_scale.set(ptoff, current);
+                }
+            }
+        }
+
+        unlockInputs();
+        return error();
+    }
 
     // ── read brush stamp from Input 0 ────────────────────────────────────────
     struct SplatStamp {

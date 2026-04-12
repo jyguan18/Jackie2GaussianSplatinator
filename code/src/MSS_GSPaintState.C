@@ -48,6 +48,7 @@ MSS_GSPaintState::MSS_GSPaintState(JEDI_View& view, PI_StateTemplate& templ,
     myIsDrawing = false;
     myBrushRadius = 0.5f;
     myCurrentStrokeStart = 0;
+    myIsPaintMode = 0;
 
     // build circle cursor geometry
     GU_PrimCircleParms cparms;
@@ -69,6 +70,13 @@ const char*
 MSS_GSPaintState::className() const
 {
     return "MSS_GSPaintState";
+}
+
+void
+MSS_GSPaintState::handleOpNodeChange(OP_Node& node)
+{
+    MSS_SingleOpState::handleOpNodeChange(node);
+    redrawScene();
 }
 
 void
@@ -222,6 +230,12 @@ MSS_GSPaintState::flushToStrokeNode(fpreal t, const char* event)
     OP_Context cookContext(t);
     strokeNode->cook(cookContext);
 
+    if (strcmp(event, "end") == 0)
+    {
+        sop->forceRecook();
+        sop->getCookedGeo(cookContext);
+    }
+
     redrawScene();
 }
 
@@ -235,6 +249,9 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
     fpreal paramRadius = sop->evalFloat("brush_radius", 0, t);
     if (!myResizingCursor)  // don't override if user is manually resizing
         myBrushRadius = (float)paramRadius;
+
+    int operation = sop->evalInt("operation", 0, t);
+    myIsPaintMode = (operation == 1);
 
     int x = event->state.values[X];
     int y = event->state.values[Y];
@@ -441,6 +458,14 @@ buildCatmullRomPreview(GU_Detail& geo,
 void
 MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
 {
+    bool isPaintMode = false;
+    SOP_Node* sop = (SOP_Node*)getNode();
+    if (sop)
+    {
+        int operation = sop->evalInt("operation", 0, getTime());
+        isPaintMode = (operation == 1);
+    }
+
     if (!isPreempted() && myIsBrushVisible)
     {
         UT_Color clr;
@@ -448,11 +473,15 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
         r->multiplyMatrix(myBrushCursorXform);
 
         if (myIsDrawing)
-            clr = UT_Color(UT_RGB, 1.0, 0.5, 0.0);  // orange when painting
+            clr = isPaintMode
+            ? UT_Color(UT_RGB, 0.0, 0.5, 1.0)
+            : UT_Color(UT_RGB, 1.0, 0.5, 0.0);
         else if (ghost)
-            clr = UT_Color(UT_RGB, 0.5, 0.5, 0.5);  // grey when occluded
+            clr = UT_Color(UT_RGB, 0.5, 0.5, 0.5);
         else
-            clr = UT_Color(UT_RGB, 1.0, 1.0, 1.0);  // white when hovering
+            clr = isPaintMode
+            ? UT_Color(UT_RGB, 0.0, 0.3, 0.8)
+            : UT_Color(UT_RGB, 1.0, 1.0, 1.0);
 
         myBrushHandle.renderWire(r, 0, 0, 0, clr, &myBrushCursor);
         r->popMatrix();

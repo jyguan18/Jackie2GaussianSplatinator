@@ -34,6 +34,19 @@ namespace HDK_Sample {
         int     ERASEMODE(fpreal t) { return evalInt("erase_mode", 0, t); }
         int     EVENT(fpreal t) { return evalInt("event", 0, t); }
 
+        int     OPERATION(fpreal t) { return evalInt("operation", 0, t); }
+        UT_Vector3 PAINTCOLOR(fpreal t)
+        {
+            return UT_Vector3(evalFloat("paint_color", 0, t),
+                evalFloat("paint_color", 1, t),
+                evalFloat("paint_color", 2, t));
+        }
+        fpreal  PAINTALPHA(fpreal t) { return evalFloat("paint_alpha", 0, t); }
+        int     COLORSOURCE(fpreal t) { return evalInt("color_source", 0, t); }
+        int     PAINTCD(fpreal t) { return evalInt("paint_cd", 0, t); }
+        int     PAINTALPHA2(fpreal t) { return evalInt("paint_alpha_on", 0, t); }
+        int     PAINTSCALE(fpreal t) { return evalInt("paint_scale", 0, t); }
+
         UT_Vector3 ORIGIN(fpreal t)
         {
             return UT_Vector3(evalFloat("origin", 0, t),

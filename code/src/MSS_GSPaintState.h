@@ -20,6 +20,8 @@ namespace HDK_Sample {
             BM_SceneManager* scene);
         static PRM_Template* ourTemplateList;
 
+        void handleOpNodeChange(OP_Node& node) override;
+
         const char* className() const override;
 
     protected:
@@ -43,6 +45,7 @@ namespace HDK_Sample {
         short       myLastCursorX, myLastCursorY;
         short       myResizeCursorX, myResizeCursorY;
         bool        myIsDrawing;
+        bool        myIsPaintMode;
 
         // stroke points accumulated during drag
         UT_Array<UT_Vector3F> myStrokePositions;
