@@ -340,7 +340,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 float brushOpacity = OPACITY(now);
 
                 GA_ROHandleV3 src_cd(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
-                GA_ROHandleF  src_alpha(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
+                GA_ROHandleF  src_alpha(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "alpha", 1));
                 GA_ROHandleV4 src_orient(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
                 GA_ROHandleV3 src_scale(splatsGdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
 
@@ -367,8 +367,11 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                         if (src_scale.isValid())
                         {
                             UT_Vector3F sc = src_scale.get(ptoff);
-                            float ld = SYSlog(SYSmax(brushScale, 1e-6f));
-                            sc.x() += ld; sc.y() += ld; sc.z() += ld; s.scale = sc;
+                            float scaleMul = SYSmax(brushScale, 1e-6f);
+                            sc.x() *= scaleMul;
+                            sc.y() *= scaleMul;
+                            sc.z() *= scaleMul;
+                            s.scale = sc;
                         }
                         else s.scale = UT_Vector3F(0, 0, 0);
                         s.orient = src_orient.isValid()
@@ -449,8 +452,9 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
             // for each base Gaussian near new stroke points, update myPaintedAttribs
             GA_Offset bptoff;
             GA_ROHandleV3 src_cd(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
-            GA_ROHandleF  src_alpha(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
+            GA_ROHandleF  src_alpha(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "alpha", 1));
             GA_ROHandleV3 src_scale(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
+            GA_ROHandleV4 src_orient(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
 
             GA_FOR_ALL_PTOFF(baseGdp, bptoff)
             {
@@ -479,6 +483,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                     newAttribs.cd = src_cd.isValid() ? UT_Vector3F(src_cd.get(bptoff)) : UT_Vector3F(1, 1, 1);
                     newAttribs.alpha = src_alpha.isValid() ? src_alpha.get(bptoff) : 1.f;
                     newAttribs.scale = src_scale.isValid() ? UT_Vector3F(src_scale.get(bptoff)) : UT_Vector3F(0, 0, 0);
+                    newAttribs.orient = src_orient.isValid() ? UT_Vector4F(src_orient.get(bptoff)) : UT_Vector4F(0, 0, 0, 1);
                     myPaintedAttribs[ptnum] = newAttribs;
                     it = myPaintedAttribs.find(ptnum);
                 }
@@ -557,7 +562,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
     // ── build output ──────────────────────────────────────────────────────
 
     GA_RWHandleV3 out_cd(gdp->addFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
-    GA_RWHandleF  out_alpha(gdp->addFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
+    GA_RWHandleF  out_alpha(gdp->addFloatTuple(GA_ATTRIB_POINT, "alpha", 1));
     GA_RWHandleV4 out_orient(gdp->addFloatTuple(GA_ATTRIB_POINT, "orient", 4));
     GA_RWHandleV3 out_scale(gdp->addFloatTuple(GA_ATTRIB_POINT, "scale", 3));
 
@@ -587,10 +592,10 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 const GaussianAttribs& a = it->second;
                 if (out_cd.isValid())    out_cd.set(newPt, UT_Vector3(a.cd));
                 if (out_alpha.isValid()) out_alpha.set(newPt, a.alpha);
-                if (src_orient.isValid() && out_orient.isValid())
-                    out_orient.set(newPt, src_orient.get(ptoff));
-                if (src_scale.isValid() && out_scale.isValid())
-                    out_scale.set(newPt, src_scale.get(ptoff));
+                if (out_orient.isValid())
+                    out_orient.set(newPt, UT_Vector4(a.orient));
+                if (out_scale.isValid())
+                    out_scale.set(newPt, UT_Vector3(a.scale));
             }
             else
             {
