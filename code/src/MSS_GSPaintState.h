@@ -46,6 +46,8 @@ namespace HDK_Sample {
         short       myResizeCursorX, myResizeCursorY;
         bool        myIsDrawing;
         bool        myIsPaintMode;
+        UT_Vector3F myCurrentHitPos;
+        bool        myHasCurrentHit;
 
         // stroke points accumulated during drag
         UT_Array<UT_Vector3F> myStrokePositions;

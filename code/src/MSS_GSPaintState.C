@@ -49,6 +49,8 @@ MSS_GSPaintState::MSS_GSPaintState(JEDI_View& view, PI_StateTemplate& templ,
     myBrushRadius = 0.5f;
     myCurrentStrokeStart = 0;
     myIsPaintMode = 0;
+    myHasCurrentHit = false;
+    myCurrentHitPos = UT_Vector3F(0, 0, 0);
 
     // build circle cursor geometry
     GU_PrimCircleParms cparms;
@@ -233,7 +235,8 @@ MSS_GSPaintState::flushToStrokeNode(fpreal t, const char* event)
     if (strcmp(event, "end") == 0)
     {
         sop->forceRecook();
-        sop->getCookedGeo(cookContext);
+        OP_Context cookContext2(t);
+        sop->getCookedGeo(cookContext2);
     }
 
     redrawScene();
@@ -279,7 +282,29 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
     }
     else if (event->reason == UI_VALUE_LOCATED)
     {
-        // just hovering — update cursor
+        // find hover hit for highlight preview
+        UT_Vector3 rayorig, dir;
+        mapToWorld(x, y, dir, rayorig);
+        UT_Vector3F ro(rayorig), rd(dir);
+        rd.normalize();
+
+        float bestT = 1e10f;
+        int   bestIdx = -1;
+        for (int i = 0; i < myCachedPoints.size(); i++)
+        {
+            const UT_Vector3F& p = myCachedPoints[i];
+            UT_Vector3F op = p - ro;
+            float t_val = op.dot(rd);
+            if (t_val < 0) continue;
+            UT_Vector3F closest = ro + rd * t_val;
+            float dist = (p - closest).length();
+            if (dist > myBrushRadius) continue;
+            if (t_val < bestT) { bestT = t_val; bestIdx = i; }
+        }
+
+        myHasCurrentHit = (bestIdx >= 0);
+        if (myHasCurrentHit) myCurrentHitPos = myCachedPoints[bestIdx];
+
         updateBrush(x, y);
     }
     else
@@ -363,6 +388,9 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
 
                 if (bestIdx >= 0)
                 {
+                    myCurrentHitPos = myCachedPoints[bestIdx];
+                    myHasCurrentHit = true;
+
                     UT_Vector3F hitPos = myCachedPoints[bestIdx];
                     UT_Vector3F hitNorm = myCachedNormals[bestIdx];
                     if (hitNorm.length() < 1e-6f) hitNorm = UT_Vector3F(0, 1, 0);
@@ -380,6 +408,10 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                         myStrokePositions.append(hitPos);
                         myStrokeNormals.append(hitNorm);
                     }
+                }
+                else
+                {
+                    myHasCurrentHit = false;
                 }
             }
 
@@ -509,6 +541,40 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
 
         UT_Color strokeClr(UT_RGB, 1.0, 0.5, 0.0);
         myBrushHandle.renderWire(r, 0, 0, 0, strokeClr, &strokePreview);
+    }
+
+    // draw affected Gaussians highlight
+    if (!isPreempted() && myIsBrushVisible && myHasCurrentHit && myCachedPoints.size() > 0)
+    {
+        GU_Detail highlightGeo;
+        float radius2 = myBrushRadius * myBrushRadius;
+
+        // pick highlight color based on operation
+        UT_Color highlightClr;
+        if (isPaintMode)
+            highlightClr = UT_Color(UT_RGB, 0.0, 0.5, 1.0);
+        else
+        {
+            SOP_Node* sop2 = (SOP_Node*)getNode();
+            int op = sop2 ? sop2->evalInt("operation", 0, getTime()) : 0;
+            if (op == 2)
+                highlightClr = UT_Color(UT_RGB, 1.0, 0.1, 0.1);
+            else
+                highlightClr = UT_Color(UT_RGB, 1.0, 0.8, 0.0);
+        }
+
+        // find all cached points within brush radius of current hit
+        for (int i = 0; i < myCachedPoints.size(); i++)
+        {
+            float d2 = (myCachedPoints[i] - myCurrentHitPos).length2();
+            if (d2 > radius2) continue;
+
+            GA_Offset pt = highlightGeo.appendPoint();
+            highlightGeo.setPos3(pt, UT_Vector3(myCachedPoints[i]));
+        }
+
+        if (highlightGeo.getNumPoints() > 0)
+            myBrushHandle.renderWire(r, 0, 0, 0, highlightClr, &highlightGeo);
     }
 }
 

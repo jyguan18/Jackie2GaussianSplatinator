@@ -64,6 +64,8 @@ namespace HDK_Sample {
                 evalFloat("direction", 2, t));
         }
 
+        int ERASEBASE(fpreal t) { return evalInt("erase_base", 0, t); }
+
         static int onClearPoints(void* data, int index, fpreal t, const PRM_Template*);
 
         // persistent accumulated state

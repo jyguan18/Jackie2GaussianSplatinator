@@ -54,6 +54,7 @@ static PRM_Name names[] = {
     PRM_Name("paint_cd",      "Modify Color"),
     PRM_Name("paint_alpha_on","Modify Alpha"),
     PRM_Name("paint_scale",   "Modify Scale"),
+    PRM_Name("erase_base", "Erase Base Scene"),
 };
 
 static PRM_Default scaleDefault(1.0f);
@@ -118,8 +119,10 @@ SOP_GSPaintBrush::myTemplateList[] =
     PRM_Template(PRM_TOGGLE,   1, &names[15]),  // modify alpha
     PRM_Template(PRM_TOGGLE,   1, &names[16]),  // modify scale
     PRM_Template(PRM_TOGGLE,   1, &names[4]),   // preview mode
+    PRM_Template(PRM_TOGGLE, 1, &names[17]),  // erase base scene
     PRM_Template(PRM_CALLBACK, 1, &names[9], &buttonDefault, 0, 0,
                  &SOP_GSPaintBrush::onClearPoints),
+    
     PRM_Template()
 };
 
@@ -518,41 +521,48 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
         }
         else if (operation == 2 && baseGdp) // erase mode
         {
-            float radius2 = brushRadius * brushRadius;
+            UT_Array<UT_Vector3F> allStrokePositions;
+            {
+                GA_Offset ptoff;
+                GA_FOR_ALL_PTOFF(targetGdp, ptoff)
+                    allStrokePositions.append(UT_Vector3F(targetGdp->getPos3(ptoff)));
+            }
 
-            // erase from base scene
-            //GA_Offset bptoff;
-            //GA_FOR_ALL_PTOFF(baseGdp, bptoff)
-            //{
-            //    UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(bptoff));
-            //    for (const UT_Vector3F& sp : newStrokePositions)
-            //    {
-            //        if ((pos - sp).length2() <= radius2)
-            //        {
-            //            myErasedPoints.insert(baseGdp->pointIndex(bptoff));
-            //            break;
-            //        }
-            //    }
-            //}
+            // only erase base scene if toggle is on
+            if (ERASEBASE(now))
+            {
+                GA_Offset bptoff;
+                GA_FOR_ALL_PTOFF(baseGdp, bptoff)
+                {
+                    UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(bptoff));
+                    for (const UT_Vector3F& sp : allStrokePositions)
+                    {
+                        if ((pos - sp).length2() <= radius2)
+                        {
+                            myErasedPoints.insert(baseGdp->pointIndex(bptoff));
+                            break;
+                        }
+                    }
+                }
+            }
 
-            // also erase stamps within brush radius
+            // always erase stamps
             UT_Array<GaussianAttribs> survivingStamps;
             for (const GaussianAttribs& a : myStampedGaussians)
             {
                 bool erased = false;
-                for (const UT_Vector3F& sp : newStrokePositions)
+                for (const UT_Vector3F& sp : allStrokePositions)
                 {
                     if ((a.pos - sp).length2() <= radius2)
                     {
-                        erased = true;
-                        break;
+                        erased = true; break;
                     }
                 }
                 if (!erased) survivingStamps.append(a);
             }
             myStampedGaussians = survivingStamps;
 
-            // also remove paint modifications within brush radius
+            // always remove paint modifications
             UT_Array<GA_Index> toRemove;
             for (auto& kv : myPaintedAttribs)
             {
@@ -562,14 +572,13 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 {
                     if ((pos - sp).length2() <= radius2)
                     {
-                        toRemove.append(kv.first);
-                        break;
+                        toRemove.append(kv.first); break;
                     }
                 }
             }
             for (GA_Index idx : toRemove)
                 myPaintedAttribs.erase(idx);
-                }
+        }
     }
     else if (targetGdp && targetGdp->getNumPoints() == 0)
     {
