@@ -158,6 +158,11 @@ SOP_GSPaintBrush::SOP_GSPaintBrush(OP_Network* net, const char* name, OP_Operato
 {
     myCurrPoint = -1;
     myLastProcessedStrokeSize = 0;
+
+    myLastDensity = -1.0f;
+    myLastScale = -1.0f;
+    myLastOpacity = -1.0f;
+    myLastBrushRadius = -1.0f;
 }
 
 SOP_GSPaintBrush::~SOP_GSPaintBrush() {}
@@ -298,6 +303,18 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
 
     int operation = OPERATION(now);
 
+    float density = DENSITY(now);
+    float scale = SCALE(now);
+    float opacity = OPACITY(now);
+    float radius = BRUSH_RADIUS(now);
+
+    // Check if parameter change.
+    bool parmChanged =
+        density != myLastDensity ||
+        scale != myLastScale ||
+        opacity != myLastOpacity ||
+        radius != myLastBrushRadius;
+
     // ── get base scene ────────────────────────────────────────────────────
     const GU_Detail* baseGdp = inputGeo(2, context);
 
@@ -305,7 +322,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
     const GU_Detail* targetGdp = inputGeo(1, context);
 
     // ── process NEW stroke points since last cook ─────────────────────────
-    if (targetGdp && targetGdp->getNumPoints() > myLastProcessedStrokeSize)
+    if (targetGdp && (targetGdp->getNumPoints() > myLastProcessedStrokeSize || parmChanged))
     {
         float brushRadius = BRUSH_RADIUS(now);
         float radius2 = brushRadius * brushRadius;
@@ -314,10 +331,14 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
         UT_Array<UT_Vector3F> newStrokePositions;
         int idx = 0;
         GA_Offset ptoff;
+        bool useAllStrokePoints = parmChanged;
+
         GA_FOR_ALL_PTOFF(targetGdp, ptoff)
         {
-            if (idx >= myLastProcessedStrokeSize)
-                newStrokePositions.append(UT_Vector3F(targetGdp->getPos3(ptoff)));
+            if (useAllStrokePoints || idx >= myLastProcessedStrokeSize)
+                newStrokePositions.append(
+                    UT_Vector3F(targetGdp->getPos3(ptoff))
+                );
             idx++;
         }
         myLastProcessedStrokeSize = targetGdp->getNumPoints();
@@ -622,6 +643,11 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
         if (out_orient.isValid()) out_orient.set(newPt, UT_Vector4(a.orient));
         if (out_scale.isValid())  out_scale.set(newPt, UT_Vector3(a.scale));
     }
+
+    myLastDensity = density;
+    myLastScale = scale;
+    myLastOpacity = opacity;
+    myLastBrushRadius = radius;
 
     unlockInputs();
     return error();

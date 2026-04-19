@@ -89,6 +89,12 @@ namespace HDK_Sample {
 
         int  myCurrPoint;
         int  myTotalPoints;
+
+        // Track last updated parameters.
+        float myLastDensity;
+        float myLastScale;
+        float myLastOpacity;
+        float myLastBrushRadius;
     };
 } // End HDK_Sample namespace
 
