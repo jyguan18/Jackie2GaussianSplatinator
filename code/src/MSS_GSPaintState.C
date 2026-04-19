@@ -85,7 +85,7 @@ void
 MSS_GSPaintState::buildRayIntersect()
 {
     myCachedPoints.clear();
-    myCachedNormals.clear();
+    //myCachedNormals.clear();
     myCanvasGdp = nullptr;
 
     SOP_Node* sop = (SOP_Node*)getNode();
@@ -106,20 +106,29 @@ MSS_GSPaintState::buildRayIntersect()
 
     myCanvasGdp = geo;
 
+    GA_OffsetArray offsetTree;
+
     // cache all point positions
     GA_ROHandleV3 nHandle(geo->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
 
     GA_Offset ptoff;
     GA_FOR_ALL_PTOFF(geo, ptoff)
     {
-        myCachedPoints.append(UT_Vector3F(geo->getPos3(ptoff)));
+        offsetTree.append(ptoff);
 
-        // cache normal if available, otherwise use zero (we'll estimate later)
+        myCachedPoints.append(
+            UT_Vector3F(geo->getPos3(ptoff)));
+
         if (nHandle.isValid())
-            myCachedNormals.append(UT_Vector3F(nHandle.get(ptoff)));
+            myCachedNormals.append(
+                UT_Vector3F(nHandle.get(ptoff)));
         else
-            myCachedNormals.append(UT_Vector3F(0, 1, 0));
+            myCachedNormals.append(
+                UT_Vector3F(0, 1, 0));
     }
+
+    myPointTree.reset(new GEO_PointTreeGAOffset());
+    myPointTree->build(geo, offsetTree, true);
 
     printf("[GSPaint] Cached %d Gaussian points for painting\n",
         (int)myCachedPoints.size());
@@ -313,6 +322,8 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
         UT_Vector3 rayorig, dir;
         mapToWorld(x, y, dir, rayorig);
 
+        GA_Offset nearest = myPointTree->findNearestIdx(UT_Vector3(rayorig));
+
         // keeping in world space so no transformations
         /*xformToObjectCoord(rayorig);
         xformToObjectVector(dir);*/
@@ -360,40 +371,61 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                 UT_Vector3F ro(rayorig), rd(dir);
                 rd.normalize();
 
-                // find nearest Gaussian point to ray
-                float bestDist = 1e10f;
-                float bestT = 1e10f;  // depth along ray
-                int   bestIdx = -1;
+                // ----- [START] kd tree data structure. -----
+                // Offset for best point near kd tree.
+                float bestT = 1e10f;
+                GA_Offset bestOffset = GA_INVALID_OFFSET;
 
-                for (int i = 0; i < myCachedPoints.size(); i++)
+                // Candidate array.
+                GA_OffsetArray candidates;
+
+                // sample along ray.
+                for (float tSample = 0.0f; tSample < 200.0f; tSample += myBrushRadius)
                 {
-                    const UT_Vector3F& p = myCachedPoints[i];
-                    UT_Vector3F op = p - ro;
-                    float t_val = op.dot(rd);
-                    if (t_val < 0) continue;  // behind camera
+                    candidates.clear();
 
-                    UT_Vector3F closest = ro + rd * t_val;
-                    float dist = (p - closest).length();
+                    UT_Vector3 samplePos = ro + rd * tSample;
 
-                    if (dist > myBrushRadius) continue;  // outside brush radius
+                    // Find closest candidates to sample position in brushRadius.
+                    myPointTree->findAllCloseIdx(samplePos, myBrushRadius, candidates);
 
-                    // among points within brush radius, prefer the closest to camera
-                    if (t_val < bestT)
+                    for (exint i = 0; i < candidates.size(); i++)
                     {
-                        bestT = t_val;
-                        bestDist = dist;
-                        bestIdx = i;
+                        GA_Offset off = candidates(i);
+
+                        UT_Vector3F p = myCanvasGdp->getPos3(off);
+
+                        UT_Vector3F op = p - ro;
+                        float t_val = op.dot(rd);
+
+                        if (t_val < 0) continue;
+
+                        UT_Vector3F closest = ro + rd * t_val;
+                        float dist = (p - closest).length();
+
+                        if (dist > myBrushRadius) continue;
+
+                        if (t_val < bestT)
+                        {
+                            bestT = t_val;
+                            bestOffset = off;
+                        }
                     }
                 }
 
-                if (bestIdx >= 0)
+                // Use bestOffset to get hit position.
+                if (bestOffset != GA_INVALID_OFFSET)
                 {
-                    myCurrentHitPos = myCachedPoints[bestIdx];
-                    myHasCurrentHit = true;
+                    UT_Vector3F hitPos = myCanvasGdp->getPos3(bestOffset);
+                    UT_Vector3F hitNorm(0, 1, 0);
 
-                    UT_Vector3F hitPos = myCachedPoints[bestIdx];
-                    UT_Vector3F hitNorm = myCachedNormals[bestIdx];
-                    if (hitNorm.length() < 1e-6f) hitNorm = UT_Vector3F(0, 1, 0);
+                    // Recreate reference to normal attribute so we can use that to calc hitNorm.
+                    GA_ROHandleV3 nHandle(myCanvasGdp->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
+
+                    if (nHandle.isValid())
+                    {
+                        hitNorm = UT_Vector3F(nHandle.get(bestOffset));
+                    }
 
                     bool tooClose = false;
                     if (myStrokePositions.size() > (exint)myCurrentStrokeStart)
@@ -408,11 +440,66 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                         myStrokePositions.append(hitPos);
                         myStrokeNormals.append(hitNorm);
                     }
+
                 }
-                else
-                {
-                    myHasCurrentHit = false;
-                }
+
+                // ----- [END] kd tree data structure. -----
+
+                // ----- [START] O(n) linear search. -----
+                // find nearest Gaussian point to ray
+                //float bestDist = 1e10f;
+                //float bestT = 1e10f;  // depth along ray
+                //int   bestIdx = -1;
+
+                //for (int i = 0; i < myCachedPoints.size(); i++)
+                //{
+                //    const UT_Vector3F& p = myCachedPoints[i];
+                //    UT_Vector3F op = p - ro;
+                //    float t_val = op.dot(rd);
+                //    if (t_val < 0) continue;  // behind camera
+
+                //    UT_Vector3F closest = ro + rd * t_val;
+                //    float dist = (p - closest).length();
+
+                //    if (dist > myBrushRadius) continue;  // outside brush radius
+
+                //    // among points within brush radius, prefer the closest to camera
+                //    if (t_val < bestT)
+                //    {
+                //        bestT = t_val;
+                //        bestDist = dist;
+                //        bestIdx = i;
+                //    }
+                //}
+
+                //if (bestIdx >= 0)
+                //{
+                //    myCurrentHitPos = myCachedPoints[bestIdx];
+                //    myHasCurrentHit = true;
+
+                //    UT_Vector3F hitPos = myCachedPoints[bestIdx];
+                //    UT_Vector3F hitNorm = myCachedNormals[bestIdx];
+                //    if (hitNorm.length() < 1e-6f) hitNorm = UT_Vector3F(0, 1, 0);
+
+                //    bool tooClose = false;
+                //    if (myStrokePositions.size() > (exint)myCurrentStrokeStart)
+                //    {
+                //        UT_Vector3F last = myStrokePositions.last();
+                //        if ((hitPos - last).length() < myBrushRadius * 0.01f)
+                //            tooClose = true;
+                //    }
+
+                //    if (!tooClose)
+                //    {
+                //        myStrokePositions.append(hitPos);
+                //        myStrokeNormals.append(hitNorm);
+                //    }
+                //}
+                //else
+                //{
+                //    myHasCurrentHit = false;
+                //}
+                // ----- [END] O(n) linear search. -----
             }
 
             flushToStrokeNode(t, "active");

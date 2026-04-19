@@ -5,6 +5,9 @@
 #include <DM/DM_Detail.h>
 #include <GU/GU_Detail.h>
 
+// For kd tree.
+#include <GEO/GEO_PointTree.h>
+
 class JEDI_View;
 
 namespace HDK_Sample {
@@ -61,6 +64,9 @@ namespace HDK_Sample {
 
         void        flushToStrokeNode(fpreal t, const char* event);
         void        buildRayIntersect();
+
+        // Kd tree variable.
+        std::unique_ptr<GEO_PointTreeGAOffset> myPointTree;
     };
 } // End HDK_Sample namespace
 
