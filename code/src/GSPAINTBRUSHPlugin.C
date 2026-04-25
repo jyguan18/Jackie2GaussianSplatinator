@@ -55,6 +55,7 @@ static PRM_Name names[] = {
     PRM_Name("paint_alpha_on","Modify Alpha"),
     PRM_Name("paint_scale",   "Modify Scale"),
     PRM_Name("erase_base", "Erase Base Scene"),
+    PRM_Name("orient_mode", "Orient Mode"),
 };
 
 static PRM_Default scaleDefault(1.0f);
@@ -86,6 +87,17 @@ static PRM_Name colorSourceMenuNames[] = {
 };
 static PRM_ChoiceList colorSourceMenu(PRM_CHOICELIST_SINGLE, colorSourceMenuNames);
 static PRM_Default    colorSourceDefault(0); // picker
+
+// Choice list for orientation modes.
+static PRM_Name orientModeMenuNames[] = {
+    PRM_Name("normal",   "Surface Normal Only"),
+    PRM_Name("base",     "Orient to Base Splat"),
+    PRM_Name("stroke",   "Orient to Stroke Direction"),
+    PRM_Name(0)
+};
+
+static PRM_ChoiceList orientModeMenu(PRM_CHOICELIST_SINGLE, orientModeMenuNames);
+static PRM_Default    orientModeDefault(0); // surface normal only.
 
 // paint defaults
 static PRM_Default paintAlphaDefault(0.5f);
@@ -120,6 +132,7 @@ SOP_GSPaintBrush::myTemplateList[] =
     PRM_Template(PRM_TOGGLE,   1, &names[16]),  // modify scale
     PRM_Template(PRM_TOGGLE,   1, &names[4]),   // preview mode
     PRM_Template(PRM_TOGGLE, 1, &names[17]),  // erase base scene
+    PRM_Template(PRM_ORD, 1, &names[18], &orientModeDefault, &orientModeMenu), // orient mode
     PRM_Template(PRM_CALLBACK, 1, &names[9], &buttonDefault, 0, 0,
                  &SOP_GSPaintBrush::onClearPoints),
     
@@ -456,9 +469,49 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                         targetNormal.normalize();
 
                         UT_QuaternionF normalRot = rotationBetween(stampUpDir, targetNormal);
-                        UT_QuaternionF baseOrientQ(sp.baseOrient.x(), sp.baseOrient.y(),
-                            sp.baseOrient.z(), sp.baseOrient.w());
-                        UT_QuaternionF stampRot = multiplyQuat(baseOrientQ, normalRot);
+                        UT_QuaternionF stampRot;
+
+                        // Toggle between three orientation modes.
+                        int orientMode = ORIENTMODE(now);
+                        if (orientMode == 1 && tgt_baseOrient.isValid()) // Base splat orientation.
+                        {
+                            UT_QuaternionF baseOrientQ(sp.baseOrient.x(), sp.baseOrient.y(),
+                                sp.baseOrient.z(), sp.baseOrient.w());
+                            stampRot = multiplyQuat(baseOrientQ, normalRot);
+                        }
+                        // TODO: Fix stroke orientation mode.
+                        else if (orientMode == 2) // Stroke orientation.
+                        {
+                            int spIdx = (int)(&sp - spline.data());
+                            UT_Vector3F tangent;
+                            if (spIdx + 1 < spline.size())
+                                tangent = spline[spIdx + 1].pos - sp.pos;
+                            else if (spIdx > 0)
+                                tangent = sp.pos - spline[spIdx - 1].pos;
+                            else
+                                tangent = UT_Vector3F(1, 0, 0);  // fallback
+
+                            if (tangent.length() > 1e-6f) tangent.normalize();
+
+                            UT_Vector3F right = cross(tangent, targetNormal);
+                            if (right.length() < 1e-6f)
+                                right = cross(tangent, UT_Vector3F(0, 0, 1));
+                            right.normalize();
+                            UT_Vector3F correctedTangent = cross(targetNormal, right);
+                            correctedTangent.normalize();
+
+                            UT_QuaternionF strokeRot;
+                            strokeRot.updateFromRotationMatrix(
+                                UT_Matrix3F(right.x(), right.y(), right.z(),
+                                    targetNormal.x(), targetNormal.y(), targetNormal.z(),
+                                    correctedTangent.x(), correctedTangent.y(), correctedTangent.z())
+                            );
+                            stampRot = strokeRot;
+                        }
+                        else // Surface normal orientation (original behaviour).
+                        {
+                            stampRot = normalRot;
+                        }
 
                         for (const SplatStamp& s : brushPattern)
                         {

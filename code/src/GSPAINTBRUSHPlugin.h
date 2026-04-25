@@ -65,6 +65,7 @@ namespace HDK_Sample {
         }
 
         int ERASEBASE(fpreal t) { return evalInt("erase_base", 0, t); }
+        int ORIENTMODE(fpreal t) { return evalInt("orient_mode", 0, t); }
 
         static int onClearPoints(void* data, int index, fpreal t, const PRM_Template*);
 
