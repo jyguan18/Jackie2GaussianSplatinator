@@ -56,6 +56,7 @@ namespace HDK_Sample {
         UT_Array<UT_Vector3F> myStrokePositions;
         UT_Array<UT_Vector3F> myStrokeNormals;
         UT_Array<int>         myStrokeLengths;
+        UT_Array<UT_Vector4F> myStrokeBaseOrients;
         int                   myCurrentStrokeStart;
 
         const GU_Detail* myCanvasGdp;

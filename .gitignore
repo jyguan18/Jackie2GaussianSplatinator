@@ -3,3 +3,6 @@ backup/
 
 # Ignore build folder.
 code/build/
+
+# Ignore splatData.
+splatData/

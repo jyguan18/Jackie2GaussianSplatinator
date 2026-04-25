@@ -147,6 +147,7 @@ MSS_GSPaintState::enter(BM_SimpleState::BM_EntryType how)
     myStrokePositions.clear();
     myStrokeNormals.clear();
     myStrokeLengths.clear();
+	myStrokeBaseOrients.clear();
     myCurrentStrokeStart = 0;
     myIsDrawing = false;
 
@@ -208,21 +209,30 @@ MSS_GSPaintState::flushToStrokeNode(fpreal t, const char* event)
     fflush(stdout);
 
     // build position and normal strings
-    UT_String posStr, normStr, lengthStr;
+    UT_String posStr, normStr, lengthStr, orientStr;
     posStr = "[";
-    normStr = "[";
     for (int i = 0; i < myStrokePositions.size(); i++)
     {
         const UT_Vector3F& p = myStrokePositions[i];
-        const UT_Vector3F& n = myStrokeNormals[i];
         UT_String ps, ns;
         ps.sprintf("(%g,%g,%g)", p.x(), p.y(), p.z());
-        ns.sprintf("(%g,%g,%g)", n.x(), n.y(), n.z());
-        if (i > 0) { posStr += ","; normStr += ","; }
+        if (i > 0) { posStr += ","; }
         posStr += ps;
-        normStr += ns;
     }
     posStr += "]";
+
+    normStr = "[";
+    for (int i = 0; i < myStrokePositions.size(); i++)
+    {
+        const UT_Vector3F& n = myStrokeNormals[i];
+        const UT_Vector4F& o = myStrokeBaseOrients[i];
+        UT_String ns;
+        ns.sprintf("(%g,%g,%g,%g,%g,%g,%g)",
+            n.x(), n.y(), n.z(),
+            o.x(), o.y(), o.z(), o.w());
+        if (i > 0) normStr += ",";
+        normStr += ns;
+    }
     normStr += "]";
 
     lengthStr = "[";
@@ -435,10 +445,24 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                             tooClose = true;
                     }
 
-                    if (!tooClose)
+                    GA_ROHandleV4 orientHandle(myCanvasGdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
+                    UT_Vector4F hitBaseOrient(0.f, 0.f, 0.f, 1.f); 
+                    if (orientHandle.isValid())
+                        hitBaseOrient = UT_Vector4F(orientHandle.get(bestOffset));
+
+                    bool tooClose2 = false;
+                    if (myStrokePositions.size() > (exint)myCurrentStrokeStart)
+                    {
+                        UT_Vector3F last = myStrokePositions.last();
+                        if ((hitPos - last).length() < myBrushRadius * 0.01f)
+                            tooClose2 = true;
+                    }
+
+                    if (!tooClose && !tooClose2)
                     {
                         myStrokePositions.append(hitPos);
                         myStrokeNormals.append(hitNorm);
+                        myStrokeBaseOrients.append(hitBaseOrient);
                     }
 
                 }

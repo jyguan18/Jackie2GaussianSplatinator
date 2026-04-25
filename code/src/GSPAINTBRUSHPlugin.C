@@ -244,11 +244,13 @@ catmullRom(const UT_Array<UT_Vector3F>& pts, const UT_Array<float>& arc, float t
         (-p0 + 3.f * p1 - 3.f * p2 + p3) * u * u * u);
 }
 
-struct SplinePoint { UT_Vector3F pos, norm; };
+struct SplinePoint { UT_Vector3F pos, norm; UT_Vector4F baseOrient; };
 
 static UT_Array<SplinePoint>
 buildSpline(const UT_Array<UT_Vector3F>& pts,
-    const UT_Array<UT_Vector3F>& norms, float density)
+    const UT_Array<UT_Vector3F>& norms, 
+    const UT_Array<UT_Vector4F>& baseOrients, 
+    float density)
 {
     UT_Array<SplinePoint> result;
     int n = pts.size();
@@ -268,7 +270,7 @@ buildSpline(const UT_Array<UT_Vector3F>& pts,
         {
             float d = SYSabs(arc[j] - t); if (d < best) { best = d; nearest = j; }
         }
-        SplinePoint sp; sp.pos = pos; sp.norm = norms[nearest];
+        SplinePoint sp; sp.pos = pos; sp.norm = norms[nearest]; sp.baseOrient = baseOrients[nearest];
         result.append(sp);
     }
     return result;
@@ -290,6 +292,8 @@ SOP_GSPaintBrush::onClearPoints(void* data, int index, fpreal t,
         "point_normals", 0, t);
     strokeNode->setString("", CH_StringMeaning::CH_STRING_LITERAL,
         "stroke_lengths", 0, t);
+    strokeNode->setString("", CH_StringMeaning::CH_STRING_LITERAL, 
+        "base_orients", 0, t);
     OP_Context cookContext(t);
     strokeNode->cook(cookContext);
     return 1;
@@ -409,8 +413,10 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 // build spline from ALL stroke points
                 GA_ROHandleV3 tgt_normal(targetGdp->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
                 GA_ROHandleI  tgt_strokeId(targetGdp->findIntTuple(GA_ATTRIB_POINT, "piece", 1));
+                GA_ROHandleV4 tgt_baseOrient(targetGdp->findFloatTuple(GA_ATTRIB_POINT, "base_orient", 4));
 
                 std::map<int, UT_Array<UT_Vector3F>> strokePts, strokeNorms;
+                std::map<int, UT_Array<UT_Vector4F>> strokeBaseOrients;
                 const UT_Vector3F stampUpDir(0, 1, 0);
                 {
                     GA_Offset ptoff;
@@ -426,6 +432,11 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                         }
                         strokePts[piece].append(pos);
                         strokeNorms[piece].append(norm);
+
+                        UT_Vector4F bOrient(0.f, 0.f, 0.f, 1.f);
+                        if (tgt_baseOrient.isValid())
+                            bOrient = UT_Vector4F(tgt_baseOrient.get(ptoff));
+                        strokeBaseOrients[piece].append(bOrient);
                     }
                 }
 
@@ -436,14 +447,18 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 for (auto& kv : strokePts)
                 {
                     int piece = kv.first;
-                    auto spline = buildSpline(strokePts[piece], strokeNorms[piece], density);
+                    auto spline = buildSpline(strokePts[piece], strokeNorms[piece], strokeBaseOrients[piece], density);
 
                     for (const SplinePoint& sp : spline)
                     {
                         UT_Vector3F targetNormal = sp.norm;
                         if (targetNormal.length() < 1e-6f) targetNormal = stampUpDir;
                         targetNormal.normalize();
-                        UT_QuaternionF stampRot = rotationBetween(stampUpDir, targetNormal);
+
+                        UT_QuaternionF normalRot = rotationBetween(stampUpDir, targetNormal);
+                        UT_QuaternionF baseOrientQ(sp.baseOrient.x(), sp.baseOrient.y(),
+                            sp.baseOrient.z(), sp.baseOrient.w());
+                        UT_QuaternionF stampRot = multiplyQuat(baseOrientQ, normalRot);
 
                         for (const SplatStamp& s : brushPattern)
                         {
