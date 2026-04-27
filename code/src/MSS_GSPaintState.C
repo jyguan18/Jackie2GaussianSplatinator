@@ -51,6 +51,7 @@ MSS_GSPaintState::MSS_GSPaintState(JEDI_View& view, PI_StateTemplate& templ,
     myIsPaintMode = 0;
     myHasCurrentHit = false;
     myCurrentHitPos = UT_Vector3F(0, 0, 0);
+    myRayHitPos = UT_Vector3F(0, 0, 0);
 
     // build circle cursor geometry
     GU_PrimCircleParms cparms;
@@ -322,7 +323,10 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
         }
 
         myHasCurrentHit = (bestIdx >= 0);
-        if (myHasCurrentHit) myCurrentHitPos = myCachedPoints[bestIdx];
+        if (myHasCurrentHit) {
+            myCurrentHitPos = myCachedPoints[bestIdx];
+            myRayHitPos = ro + rd * bestT; // smooth point on ray so brush is not snapping around like a wild turtle
+        }
 
         updateBrush(x, y);
     }
@@ -438,6 +442,7 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                     }
 
                     myCurrentHitPos = hitPos;
+                    myRayHitPos = ro + rd * bestT;
                     myHasCurrentHit = true;
 
                     bool tooClose = false;
@@ -788,12 +793,23 @@ void
 MSS_GSPaintState::updateBrush(int x, int y)
 {
     getViewportItransform(myBrushCursorXform);
-    UT_Vector3 forward = rowVecMult3(UT_Vector3(0, 0, -1), myBrushCursorXform);
-    UT_Vector3 rayorig, dir;
-    mapToWorld(x, y, dir, rayorig);
-    UT_Vector3 delta(1.0 / dot(dir, forward) * dir);
-    myBrushCursorXform.translate(delta.x(), delta.y(), delta.z());
-    myBrushCursorXform.prescale(myBrushRadius, myBrushRadius, 1);
+
+    if (myHasCurrentHit)
+    {
+        UT_Vector3 forward = rowVecMult3(UT_Vector3(0, 0, -1), myBrushCursorXform);
+        myBrushCursorXform.setTranslates(myRayHitPos);
+        myBrushCursorXform.prescale(myBrushRadius, myBrushRadius, 1);
+    }
+    else
+    {
+        UT_Vector3 forward = rowVecMult3(UT_Vector3(0, 0, -1), myBrushCursorXform);
+        UT_Vector3 rayorig, dir;
+        mapToWorld(x, y, dir, rayorig);
+        UT_Vector3 delta(1.0 / dot(dir, forward) * dir);
+        myBrushCursorXform.translate(delta.x(), delta.y(), delta.z());
+        myBrushCursorXform.prescale(myBrushRadius, myBrushRadius, 1);
+    }
+
     myIsBrushVisible = true;
     redrawScene();
 }

@@ -50,6 +50,7 @@ namespace HDK_Sample {
         bool        myIsDrawing;
         bool        myIsPaintMode;
         UT_Vector3F myCurrentHitPos;
+        UT_Vector3F myRayHitPos;
         bool        myHasCurrentHit;
 
         // stroke points accumulated during drag
