@@ -518,10 +518,19 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                             stampRot = normalRot;
                         }
 
+                        float minNormalProjection = 1e10f;
+                        for (const SplatStamp& s : brushPattern)
+                        {
+                            float proj = rotateVector(s.localOffset, stampRot).dot(targetNormal);
+                            if (proj < minNormalProjection)
+                                minNormalProjection = proj;
+                        }
+                        UT_Vector3F anchorLift = targetNormal * (-minNormalProjection);
+
                         for (const SplatStamp& s : brushPattern)
                         {
                             GaussianAttribs a;
-                            a.pos = sp.pos + rotateVector(s.localOffset, stampRot);
+                            a.pos = sp.pos + rotateVector(s.localOffset, stampRot) + anchorLift;
                             a.cd = s.cd;
                             a.alpha = s.alpha;
                             a.scale = s.scale;
