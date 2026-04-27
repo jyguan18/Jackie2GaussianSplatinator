@@ -190,6 +190,9 @@ SOP_GSPaintBrush::disableParms()
     int operation = OPERATION(t);
     bool isPaint = (operation == 1);
 
+    bool isStamp = (operation == 0);
+    bool isErase = (operation == 2);
+
     // disable paint-only params when not in paint mode
     enableParm("paint_color", isPaint);
     enableParm("paint_alpha", isPaint);
@@ -198,14 +201,16 @@ SOP_GSPaintBrush::disableParms()
     enableParm("paint_alpha_on", isPaint);
     enableParm("paint_scale", isPaint);
 
-    // disable stamp-only params when in paint mode
-    enableParm("density", !isPaint);
-    enableParm("preview_mode", !isPaint);
+    // disable stamp-only params when not in stamp mode
+    enableParm("density", isStamp);
+    enableParm("preview_mode", isStamp);
+    enableParm("orient_mode", isStamp);
+
+    // erase_base only meaningful in erase mode
+    enableParm("erase_base", isErase);
 
     return 0;
 }
-
-// ── helper functions (unchanged from before) ─────────────────────────────────
 
 static UT_QuaternionF
 rotationBetween(UT_Vector3F from, UT_Vector3F to)
