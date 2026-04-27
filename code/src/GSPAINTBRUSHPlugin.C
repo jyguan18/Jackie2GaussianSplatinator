@@ -469,6 +469,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
 
                     for (const SplinePoint& sp : spline)
                     {
+                        int spIdx = (int)(&sp - spline.data());
                         UT_Vector3F targetNormal = sp.norm;
                         if (targetNormal.length() < 1e-6f) targetNormal = stampUpDir;
                         targetNormal.normalize();
@@ -531,6 +532,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                         {
                             GaussianAttribs a;
                             a.pos = sp.pos + rotateVector(s.localOffset, stampRot) + anchorLift;
+                            a.stampCenter = sp.pos;
                             a.cd = s.cd;
                             a.alpha = s.alpha;
                             a.scale = s.scale;
@@ -629,11 +631,26 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
             }
 
             // always erase stamps
+            printf("[GSPaint] Erase: %d stamps, %d new stroke pts, radius=%.3f\n",
+                (int)myStampedGaussians.size(), (int)newStrokePositions.size(), brushRadius);
+            if (myStampedGaussians.size() > 0)
+            {
+                const UT_Vector3F& sp0 = myStampedGaussians[0].pos;
+                printf("[GSPaint]   First stamp pos: (%.3f, %.3f, %.3f)\n",
+                    sp0.x(), sp0.y(), sp0.z());
+            }
+            if (newStrokePositions.size() > 0)
+            {
+                const UT_Vector3F& s0 = newStrokePositions[0];
+                printf("[GSPaint]   First stroke pos: (%.3f, %.3f, %.3f)\n",
+                    s0.x(), s0.y(), s0.z());
+            }
+            fflush(stdout);
             UT_Array<GaussianAttribs> survivingStamps;
             for (const GaussianAttribs& a : myStampedGaussians)
             {
                 bool erased = false;
-                for (const UT_Vector3F& sp : allStrokePositions)
+                for (const UT_Vector3F& sp : newStrokePositions)
                 {
                     if ((a.pos - sp).length2() <= radius2)
                     {
@@ -642,7 +659,11 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 }
                 if (!erased) survivingStamps.append(a);
             }
+            int beforeCount = myStampedGaussians.size();
             myStampedGaussians = survivingStamps;
+            printf("[GSPaint] Erase result: %d -> %d stamps remaining\n",
+                beforeCount, (int)myStampedGaussians.size());
+            fflush(stdout);
 
             // always remove paint modifications
             UT_Array<GA_Index> toRemove;
@@ -650,7 +671,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
             {
                 GA_Offset ptoff = baseGdp->pointOffset(kv.first);
                 UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(ptoff));
-                for (const UT_Vector3F& sp : newStrokePositions)
+                for (const UT_Vector3F& sp : allStrokePositions)
                 {
                     if ((pos - sp).length2() <= radius2)
                     {
@@ -677,6 +698,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
     GA_RWHandleF  out_alpha(gdp->addFloatTuple(GA_ATTRIB_POINT, "alpha", 1));
     GA_RWHandleV4 out_orient(gdp->addFloatTuple(GA_ATTRIB_POINT, "orient", 4));
     GA_RWHandleV3 out_scale(gdp->addFloatTuple(GA_ATTRIB_POINT, "scale", 3));
+    GA_RWHandleV3 out_stampCenter(gdp->addFloatTuple(GA_ATTRIB_POINT, "stampCenter", 3));
 
     // 1. output base scene with paint modifications and erases applied
     if (baseGdp)
@@ -729,10 +751,11 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
     {
         GA_Offset newPt = gdp->appendPoint();
         gdp->setPos3(newPt, UT_Vector3(a.pos));
-        if (out_cd.isValid())     out_cd.set(newPt, UT_Vector3(a.cd));
-        if (out_alpha.isValid())  out_alpha.set(newPt, a.alpha);
-        if (out_orient.isValid()) out_orient.set(newPt, UT_Vector4(a.orient));
-        if (out_scale.isValid())  out_scale.set(newPt, UT_Vector3(a.scale));
+        if (out_cd.isValid())          out_cd.set(newPt, UT_Vector3(a.cd));
+        if (out_alpha.isValid())       out_alpha.set(newPt, a.alpha);
+        if (out_orient.isValid())      out_orient.set(newPt, UT_Vector4(a.orient));
+        if (out_scale.isValid())       out_scale.set(newPt, UT_Vector3(a.scale));
+        if (out_stampCenter.isValid()) out_stampCenter.set(newPt, UT_Vector3(a.stampCenter));
     }
 
     myLastDensity = density;

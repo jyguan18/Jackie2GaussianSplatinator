@@ -63,6 +63,7 @@ namespace HDK_Sample {
         const GU_Detail* myCanvasGdp;
         UT_Array<UT_Vector3F> myCachedPoints;
         UT_Array<UT_Vector3F> myCachedNormals;
+        UT_Array<UT_Vector3F> myStampCenters; // stamp centers from SOP output, for hover hit
 
         void        flushToStrokeNode(fpreal t, const char* event);
         void        buildRayIntersect();

@@ -288,16 +288,6 @@ MSS_GSPaintState::flushToStrokeNode(fpreal t, const char* event)
         sop->forceRecook();
         OP_Context cookContext2(t);
         sop->getCookedGeo(cookContext2);
-        // touch stroke_points to propagate the dirty flag through the
-        // full downstream network so display nodes pick up the erase
-        if (strokeNode)
-        {
-            UT_String cur;
-            strokeNode->evalString(cur, "point_positions", 0, t);
-            strokeNode->setString(cur, CH_STRING_LITERAL, "point_positions", 0, t);
-            OP_Context cookContext3(t);
-            strokeNode->cook(cookContext3);
-        }
     }
 
     redrawScene();
@@ -371,7 +361,7 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
         }
         else
         {
-            // no base point hit ? search stamp centers so the cursor
+            // no base point hit  search stamp centers so the cursor
             // aligns correctly when hovering over stamped geometry
             float stampBestT = 1e10f;
             UT_Vector3F stampBestPos;
@@ -709,7 +699,7 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
         r->popMatrix();
     }
 
-    // draw stroke path preview ? stamp mode only (paint/erase don't need it)
+    // draw stroke path preview  stamp mode only (paint/erase don't need it)
     if (!isPreempted() && myIsDrawing && myStrokePositions.size() > 1 && !isPaintMode)
     {
         int operation = sop ? sop->evalInt("operation", 0, getTime()) : 0;
@@ -811,10 +801,10 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
                         if (baseGeo) baseCount = (int)baseGeo->getNumPoints();
                     }
                 }
-
+                // use stampCenter attribute so we test the placement point,
+                // not the individual scattered splat position
                 GA_ROHandleV3 scHandle(outputGdp->findFloatTuple(
                     GA_ATTRIB_POINT, "stampCenter", 3));
-                bool eraseMode = (op == 2);
                 int outIdx = 0;
                 GA_Offset ptoff;
                 GA_FOR_ALL_PTOFF(outputGdp, ptoff)
@@ -822,23 +812,22 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
                     if (outIdx >= baseCount)
                     {
                         UT_Vector3F p(outputGdp->getPos3(ptoff));
-                        UT_Vector3F testPos = (eraseMode || !scHandle.isValid())
-                            ? p : UT_Vector3F(scHandle.get(ptoff));
+                        // get the placement center for this splat
+                        UT_Vector3F center = (scHandle.isValid())
+                            ? UT_Vector3F(scHandle.get(ptoff)) : p;
                         bool inRange = false;
                         if (useTrail)
                         {
                             for (exint s = myCurrentStrokeStart;
                                 s < myStrokePositions.size(); s++)
                             {
-                                if ((testPos - myStrokePositions[s]).length2() <= radius2)
-                                {
-                                    inRange = true; break;
-                                }
+                                if ((center - myStrokePositions[s]).length2() <= radius2)
+                                { inRange = true; break; }
                             }
                         }
                         else
                         {
-                            inRange = (testPos - myCurrentHitPos).length2() <= radius2;
+                            inRange = (center - myCurrentHitPos).length2() <= radius2;
                         }
                         if (inRange)
                         {

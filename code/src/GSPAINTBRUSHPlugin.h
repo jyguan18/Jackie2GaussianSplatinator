@@ -76,6 +76,9 @@ namespace HDK_Sample {
             UT_Vector3F scale;
             UT_Vector4F orient;
             UT_Vector3F pos;
+            UT_Vector3F stampCenter; // spline hit point this splat was placed from
+            int         piece;       // which stroke this splat belongs to
+            int         seqIdx;      // position within the stroke spline (for ordering)
         };
 
         // stamp mode: accumulated stamped Gaussians
