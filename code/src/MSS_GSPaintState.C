@@ -437,6 +437,9 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                         hitNorm = UT_Vector3F(nHandle.get(bestOffset));
                     }
 
+                    myCurrentHitPos = hitPos;
+                    myHasCurrentHit = true;
+
                     bool tooClose = false;
                     if (myStrokePositions.size() > (exint)myCurrentStrokeStart)
                     {
@@ -633,59 +636,145 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
     // having issue with drawing stamps during painting, so will just draw stroke preview directly during painting
     if (!isPreempted() && myIsDrawing && myStrokePositions.size() > 1)
     {
-        GU_Detail strokePreview;
-
-        // draw completed strokes as smooth curves
-        int start = 0;
-        for (int s = 0; s < myStrokeLengths.size(); s++)
+        int operation = sop ? sop->evalInt("operation", 0, getTime()) : 0;
+        if (operation == 0) // stamp only
         {
-            buildCatmullRomPreview(strokePreview, myStrokePositions,
-                start, myStrokeLengths[s]);
-            start += myStrokeLengths[s];
+            GU_Detail strokePreview;
+
+            // draw completed strokes as smooth curves
+            int start = 0;
+            for (int s = 0; s < myStrokeLengths.size(); s++)
+            {
+                buildCatmullRomPreview(strokePreview, myStrokePositions,
+                    start, myStrokeLengths[s]);
+                start += myStrokeLengths[s];
+            }
+
+            // draw current in-progress stroke
+            int currentLen = myStrokePositions.size() - myCurrentStrokeStart;
+            if (currentLen >= 2)
+                buildCatmullRomPreview(strokePreview, myStrokePositions,
+                    myCurrentStrokeStart, currentLen);
+
+            UT_Color strokeClr(UT_RGB, 1.0, 0.5, 0.0);
+            myBrushHandle.renderWire(r, 0, 0, 0, strokeClr, &strokePreview);
         }
-
-        // draw current in-progress stroke
-        int currentLen = myStrokePositions.size() - myCurrentStrokeStart;
-        if (currentLen >= 2)
-            buildCatmullRomPreview(strokePreview, myStrokePositions,
-                myCurrentStrokeStart, currentLen);
-
-        UT_Color strokeClr(UT_RGB, 1.0, 0.5, 0.0);
-        myBrushHandle.renderWire(r, 0, 0, 0, strokeClr, &strokePreview);
     }
 
     // draw affected Gaussians highlight
     if (!isPreempted() && myIsBrushVisible && myHasCurrentHit && myCachedPoints.size() > 0)
     {
         GU_Detail highlightGeo;
+        GU_Detail stampHighlightGeo;
         float radius2 = myBrushRadius * myBrushRadius;
 
-        // pick highlight color based on operation
         UT_Color highlightClr;
+        UT_Color stampClr;
+        int op = sop ? sop->evalInt("operation", 0, getTime()) : 0;
         if (isPaintMode)
-            highlightClr = UT_Color(UT_RGB, 0.0, 0.5, 1.0);
-        else
         {
-            SOP_Node* sop2 = (SOP_Node*)getNode();
-            int op = sop2 ? sop2->evalInt("operation", 0, getTime()) : 0;
-            if (op == 2)
-                highlightClr = UT_Color(UT_RGB, 1.0, 0.1, 0.1);
-            else
-                highlightClr = UT_Color(UT_RGB, 1.0, 0.8, 0.0);
+            highlightClr = UT_Color(UT_RGB, 0.0, 0.5, 1.0);
+            stampClr = UT_Color(UT_RGB, 0.0, 0.8, 1.0);
+        }
+        else if (op == 2) // erase
+        {
+            highlightClr = UT_Color(UT_RGB, 1.0, 0.1, 0.1);
+            stampClr = UT_Color(UT_RGB, 1.0, 0.4, 0.1);
+        }
+        else // stamp
+        {
+            highlightClr = UT_Color(UT_RGB, 1.0, 0.8, 0.0);
+            stampClr = UT_Color(UT_RGB, 0.6, 1.0, 0.2);
         }
 
-        // find all cached points within brush radius of current hit
-        for (int i = 0; i < myCachedPoints.size(); i++)
-        {
-            float d2 = (myCachedPoints[i] - myCurrentHitPos).length2();
-            if (d2 > radius2) continue;
+        // when painting and erasing, show full stroke trail. Stamp mode is just current hit.
+        bool useTrail = myIsDrawing && (op == 1 || op == 2) && myStrokePositions.size() > (exint)myCurrentStrokeStart;
 
-            GA_Offset pt = highlightGeo.appendPoint();
-            highlightGeo.setPos3(pt, UT_Vector3(myCachedPoints[i]));
+        // highlight base-scene cached points
+        if (myCachedPoints.size() > 0)
+        {
+            for (int i = 0; i < myCachedPoints.size(); i++)
+            {
+                const UT_Vector3F& p = myCachedPoints[i];
+                bool inRange = false;
+                if (useTrail)
+                {
+                    for (exint s = myCurrentStrokeStart;
+                        s < myStrokePositions.size(); s++)
+                    {
+                        if ((p - myStrokePositions[s]).length2() <= radius2)
+                        {
+                            inRange = true; break;
+                        }
+                    }
+                }
+                else
+                {
+                    inRange = (p - myCurrentHitPos).length2() <= radius2;
+                }
+                if (!inRange) continue;
+                GA_Offset pt = highlightGeo.appendPoint();
+                highlightGeo.setPos3(pt, UT_Vector3(p));
+            }
+        }
+
+        // highlight stamped Gaussians from the SOP's cooked output geometry
+        if (sop)
+        {
+            OP_Context ctx(getTime());
+            const GU_Detail* outputGdp = sop->getCookedGeo(ctx);
+            if (outputGdp)
+            {
+                OP_Node* baseInput = sop->getInput(2);
+                int baseCount = 0;
+                if (baseInput)
+                {
+                    SOP_Node* baseSop = dynamic_cast<SOP_Node*>(baseInput);
+                    if (baseSop)
+                    {
+                        const GU_Detail* baseGeo = baseSop->getCookedGeo(ctx);
+                        if (baseGeo) baseCount = (int)baseGeo->getNumPoints();
+                    }
+                }
+                int outIdx = 0;
+                GA_Offset ptoff;
+                GA_FOR_ALL_PTOFF(outputGdp, ptoff)
+                {
+                    if (outIdx >= baseCount)
+                    {
+                        UT_Vector3F p(outputGdp->getPos3(ptoff));
+                        bool inRange = false;
+                        if (useTrail)
+                        {
+                            for (exint s = myCurrentStrokeStart;
+                                s < myStrokePositions.size(); s++)
+                            {
+                                if ((p - myStrokePositions[s]).length2() <= radius2)
+                                {
+                                    inRange = true; break;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            inRange = (p - myCurrentHitPos).length2() <= radius2;
+                        }
+                        if (inRange)
+                        {
+                            GA_Offset hpt = stampHighlightGeo.appendPoint();
+                            stampHighlightGeo.setPos3(hpt, UT_Vector3(p));
+                        }
+                    }
+                    outIdx++;
+                }
+            }
         }
 
         if (highlightGeo.getNumPoints() > 0)
             myBrushHandle.renderWire(r, 0, 0, 0, highlightClr, &highlightGeo);
+
+        if (stampHighlightGeo.getNumPoints() > 0)
+            myBrushHandle.renderWire(r, 0, 0, 0, stampClr, &stampHighlightGeo);
     }
 }
 
