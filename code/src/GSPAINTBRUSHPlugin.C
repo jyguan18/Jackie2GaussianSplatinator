@@ -174,6 +174,7 @@ SOP_GSPaintBrush::SOP_GSPaintBrush(OP_Network* net, const char* name, OP_Operato
 {
     myCurrPoint = -1;
     myLastProcessedStrokeSize = 0;
+    myNextStampId = 0;
 
     myLastDensity = -1.0f;
     myLastScale = -1.0f;
@@ -328,8 +329,6 @@ SOP_GSPaintBrush::onClearPoints(void* data, int index, fpreal t,
         "point_normals", 0, t);
     strokeNode->setString("", CH_StringMeaning::CH_STRING_LITERAL,
         "stroke_lengths", 0, t);
-    strokeNode->setString("", CH_StringMeaning::CH_STRING_LITERAL, 
-        "base_orients", 0, t);
     OP_Context cookContext(t);
     strokeNode->cook(cookContext);
     return 1;
@@ -371,10 +370,16 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
         float radius2 = brushRadius * brushRadius;
 
         // collect only NEW stroke positions
+        // collect only NEW stroke positions
         UT_Array<UT_Vector3F> newStrokePositions;
         int idx = 0;
         GA_Offset ptoff;
-        bool useAllStrokePoints = parmChanged;
+        /*bool useAllStrokePoints = parmChanged;*/
+        bool useAllStrokePoints = false;
+
+        // read piece attribute once outside the loop
+        GA_ROHandleI pieceHandle(targetGdp->findIntTuple(GA_ATTRIB_POINT, "piece", 1));
+        UT_Set<int> newPiecesThisCook;
 
         GA_FOR_ALL_PTOFF(targetGdp, ptoff)
         {
@@ -382,6 +387,14 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 newStrokePositions.append(
                     UT_Vector3F(targetGdp->getPos3(ptoff))
                 );
+
+            int pieceId = pieceHandle.isValid() ? pieceHandle.get(ptoff) : 0;
+            if (!myKnownPieces.contains(pieceId))
+            {
+                myKnownPieces.insert(pieceId);
+                myStrokeModeMap[pieceId] = operation;
+                newPiecesThisCook.insert(pieceId);
+            }
             idx++;
         }
         myLastProcessedStrokeSize = targetGdp->getNumPoints();
@@ -476,18 +489,26 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                     }
                 }
 
-                // rebuild stamp sites from scratch and repopulate myStampedGaussians
-                myStampedGaussians.clear();
                 float density = DENSITY(now);
+                int orientMode = ORIENTMODE(now);
 
                 for (auto& kv : strokePts)
                 {
                     int piece = kv.first;
-                    auto spline = buildSpline(strokePts[piece], strokeNorms[piece], strokeBaseOrients[piece], density);
+
+                    // Only process pieces that arrived this cook and are stamp-mode.
+                    if (!newPiecesThisCook.contains(piece)) continue;
+                    auto modeIt = myStrokeModeMap.find(piece);
+                    if (modeIt == myStrokeModeMap.end() || modeIt->second != 0) continue;
+
+                    if (strokePts[piece].size() < 2)
+                        continue;
+
+                    auto spline = buildSpline(strokePts[piece], strokeNorms[piece],
+                        strokeBaseOrients[piece], density);
 
                     for (const SplinePoint& sp : spline)
                     {
-                        int spIdx = (int)(&sp - spline.data());
                         UT_Vector3F targetNormal = sp.norm;
                         if (targetNormal.length() < 1e-6f) targetNormal = stampUpDir;
                         targetNormal.normalize();
@@ -495,19 +516,15 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                         UT_QuaternionF normalRot = rotationBetween(stampUpDir, targetNormal);
                         UT_QuaternionF stampRot;
 
-                        // Toggle between three orientation modes.
-                        int orientMode = ORIENTMODE(now);
-                        if (orientMode == 1 && tgt_baseOrient.isValid()) // Base splat orientation.
+                        if (orientMode == 1 && tgt_baseOrient.isValid())
                         {
                             UT_QuaternionF baseOrientQ(sp.baseOrient.x(), sp.baseOrient.y(),
                                 sp.baseOrient.z(), sp.baseOrient.w());
                             stampRot = multiplyQuat(baseOrientQ, normalRot);
                         }
-                        // TODO: Fix stroke orientation mode.
-                        else if (orientMode == 2) // Stroke orientation.
+                        else if (orientMode == 2)
                         {
                             UT_Vector3F fwd = sp.tangent;
-
                             fwd -= targetNormal * targetNormal.dot(fwd);
                             if (fwd.length() < 1e-6f)
                             {
@@ -522,16 +539,16 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                             right.normalize();
 
                             UT_Matrix3F frame;
-                            frame(0, 0) = right.x();         frame(0, 1) = targetNormal.x(); frame(0, 2) = fwd.x();
-                            frame(1, 0) = right.y();         frame(1, 1) = targetNormal.y(); frame(1, 2) = fwd.y();
-                            frame(2, 0) = right.z();         frame(2, 1) = targetNormal.z(); frame(2, 2) = fwd.z();
+                            frame(0, 0) = right.x();        frame(0, 1) = targetNormal.x(); frame(0, 2) = fwd.x();
+                            frame(1, 0) = right.y();        frame(1, 1) = targetNormal.y(); frame(1, 2) = fwd.y();
+                            frame(2, 0) = right.z();        frame(2, 1) = targetNormal.z(); frame(2, 2) = fwd.z();
 
                             UT_QuaternionF strokeRot;
                             strokeRot.updateFromRotationMatrix(frame);
                             strokeRot.normalize();
                             stampRot = strokeRot;
                         }
-                        else // Surface normal orientation (original behaviour).
+                        else
                         {
                             stampRot = normalRot;
                         }
@@ -550,6 +567,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                             GaussianAttribs a;
                             a.pos = sp.pos + rotateVector(s.localOffset, stampRot) + anchorLift;
                             a.stampCenter = sp.pos;
+                            a.piece = piece;
                             a.cd = s.cd;
                             a.alpha = s.alpha;
                             a.scale = s.scale;
@@ -559,7 +577,8 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                             UT_QuaternionF rotated = multiplyQuat(splatOrient, stampRot);
                             a.orient = UT_Vector4F(rotated.x(), rotated.y(),
                                 rotated.z(), rotated.w());
-                            myStampedGaussians.append(a);
+
+                            myStampedGaussians[myNextStampId++] = a;
                         }
                     }
                 }
@@ -619,6 +638,27 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 if (modifyAlpha)
                     attribs.alpha = attribs.alpha * inv + blend;
             }
+            for (auto& kv : myStampedGaussians)
+            {
+                GaussianAttribs& a = kv.second;
+                float minDist2 = 1e10f;
+                for (const UT_Vector3F& sp : newStrokePositions)
+                {
+                    float d2 = (a.pos - sp).length2();
+                    if (d2 < minDist2) minDist2 = d2;
+                }
+                if (minDist2 > radius2) continue;
+
+                float dist = SYSsqrt(minDist2);
+                float falloff = 1.0f - (dist / brushRadius);
+                float blend = paintAlpha * falloff;
+                float inv = 1.0f - blend;
+
+                if (modifyCd)
+                    a.cd = a.cd * inv + paintColor * blend;
+                if (modifyAlpha)
+                    a.alpha = SYSclamp(a.alpha * inv + blend, 0.f, 1.f);
+            }
         }
         else if (operation == 2 && baseGdp) // erase mode
         {
@@ -647,40 +687,20 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 }
             }
 
-            // always erase stamps
-            printf("[GSPaint] Erase: %d stamps, %d new stroke pts, radius=%.3f\n",
-                (int)myStampedGaussians.size(), (int)newStrokePositions.size(), brushRadius);
-            if (myStampedGaussians.size() > 0)
+            UT_Array<int> stampKeysToErase;
+            for (auto& kv : myStampedGaussians)
             {
-                const UT_Vector3F& sp0 = myStampedGaussians[0].pos;
-                printf("[GSPaint]   First stamp pos: (%.3f, %.3f, %.3f)\n",
-                    sp0.x(), sp0.y(), sp0.z());
-            }
-            if (newStrokePositions.size() > 0)
-            {
-                const UT_Vector3F& s0 = newStrokePositions[0];
-                printf("[GSPaint]   First stroke pos: (%.3f, %.3f, %.3f)\n",
-                    s0.x(), s0.y(), s0.z());
-            }
-            fflush(stdout);
-            UT_Array<GaussianAttribs> survivingStamps;
-            for (const GaussianAttribs& a : myStampedGaussians)
-            {
-                bool erased = false;
                 for (const UT_Vector3F& sp : newStrokePositions)
                 {
-                    if ((a.pos - sp).length2() <= radius2)
+                    if ((kv.second.pos - sp).length2() <= radius2)
                     {
-                        erased = true; break;
+                        stampKeysToErase.append(kv.first);
+                        break;
                     }
                 }
-                if (!erased) survivingStamps.append(a);
             }
-            int beforeCount = myStampedGaussians.size();
-            myStampedGaussians = survivingStamps;
-            printf("[GSPaint] Erase result: %d -> %d stamps remaining\n",
-                beforeCount, (int)myStampedGaussians.size());
-            fflush(stdout);
+            for (int k : stampKeysToErase)
+                myStampedGaussians.erase(k);
 
             // always remove paint modifications
             UT_Array<GA_Index> toRemove;
@@ -706,7 +726,10 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
         myStampedGaussians.clear();
         myPaintedAttribs.clear();
         myErasedPoints.clear();
+        myStrokeModeMap.clear();
+        myKnownPieces.clear();
         myLastProcessedStrokeSize = 0;
+        myNextStampId = 0;
     }
 
     // ── build output ──────────────────────────────────────────────────────
@@ -721,7 +744,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
     if (baseGdp)
     {
         GA_ROHandleV3 src_cd(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
-        GA_ROHandleF  src_alpha(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "Alpha", 1));
+        GA_ROHandleF  src_alpha(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "alpha", 1));
         GA_ROHandleV4 src_orient(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
         GA_ROHandleV3 src_scale(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
 
@@ -764,8 +787,9 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
     }
 
     // 2. output accumulated stamps on top
-    for (const GaussianAttribs& a : myStampedGaussians)
+    for (auto& kv : myStampedGaussians)
     {
+        const GaussianAttribs& a = kv.second;
         GA_Offset newPt = gdp->appendPoint();
         gdp->setPos3(newPt, UT_Vector3(a.pos));
         if (out_cd.isValid())          out_cd.set(newPt, UT_Vector3(a.cd));

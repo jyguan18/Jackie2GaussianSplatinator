@@ -81,14 +81,25 @@ namespace HDK_Sample {
             int         seqIdx;      // position within the stroke spline (for ordering)
         };
 
+        // Updated stamp mode: map of stamp ID to GaussianAttrib.
+        UT_Map<int, GaussianAttribs> myStampedGaussians;
+        // Stamp ID counter.
+        int myNextStampId;
+
+        // ---- OLD CODE ----
         // stamp mode: accumulated stamped Gaussians
-        UT_Array<GaussianAttribs> myStampedGaussians;
+        /*UT_Array<GaussianAttribs> myStampedGaussians;*/
 
         // paint mode: per-point color overrides (keyed by point index in base scene)
         UT_Map<GA_Index, GaussianAttribs> myPaintedAttribs;
 
         // erase mode: set of erased point indices from base scene
         UT_Set<GA_Index> myErasedPoints;
+
+        // Index to operation mode (stamp/paint/erase) for each stroke.
+        UT_Map<int, int> myStrokeModeMap;
+        // set of all piece indices seen so far, to detect newly arriving pieces.
+        UT_Set<int> myKnownPieces;
 
         // track last processed stroke length to avoid reprocessing
         int myLastProcessedStrokeSize;
