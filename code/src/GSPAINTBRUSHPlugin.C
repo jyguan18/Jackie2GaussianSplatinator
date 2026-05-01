@@ -239,10 +239,9 @@ rotateVector(const UT_Vector3F& v, const UT_QuaternionF& q)
     return UT_Vector3F(result.x(), result.y(), result.z());
 }
 
-static UT_QuaternionF
-multiplyQuat(const UT_QuaternionF& q1, const UT_QuaternionF& q2)
-{
-    return q2 * q1;
+static UT_QuaternionF 
+multiplyQuat(const UT_QuaternionF& q1, const UT_QuaternionF& q2) {
+    return q1 * q2;
 }
 
 static UT_Vector3F
@@ -262,12 +261,12 @@ catmullRom(const UT_Array<UT_Vector3F>& pts, const UT_Array<float>& arc, float t
         (-p0 + 3.f * p1 - 3.f * p2 + p3) * u * u * u);
 }
 
-struct SplinePoint { UT_Vector3F pos, norm; UT_Vector4F baseOrient; };
+struct SplinePoint { UT_Vector3F pos, norm, tangent; UT_Vector4F baseOrient; };
 
 static UT_Array<SplinePoint>
 buildSpline(const UT_Array<UT_Vector3F>& pts,
-    const UT_Array<UT_Vector3F>& norms, 
-    const UT_Array<UT_Vector4F>& baseOrients, 
+    const UT_Array<UT_Vector3F>& norms,
+    const UT_Array<UT_Vector4F>& baseOrients,
     float density)
 {
     UT_Array<SplinePoint> result;
@@ -279,16 +278,35 @@ buildSpline(const UT_Array<UT_Vector3F>& pts,
     float total = arc[n - 1];
     if (total < 0.001f) return result;
     int n_samples = SYSmax(2, (int)(total * density));
+
+    const float eps = total * 0.001f + 0.0001f;
+
     for (int i = 0; i < n_samples; i++)
     {
         float t = total * (float)i / (float)(n_samples - 1);
         UT_Vector3F pos = catmullRom(pts, arc, t);
+
+        float t0 = SYSmax(0.f, t - eps);
+        float t1 = SYSmin(total, t + eps);
+        UT_Vector3F tangent = catmullRom(pts, arc, t1) - catmullRom(pts, arc, t0);
+        if (tangent.length() < 1e-6f)
+        {
+            tangent = (i + 1 < n_samples)
+                ? catmullRom(pts, arc, SYSmin(total, t + eps * 10.f)) - pos
+                : pos - catmullRom(pts, arc, SYSmax(0.f, t - eps * 10.f));
+        }
+        tangent.normalize();
+
         int nearest = 0; float best = SYSabs(arc[0] - t);
         for (int j = 1; j < n; j++)
         {
             float d = SYSabs(arc[j] - t); if (d < best) { best = d; nearest = j; }
         }
-        SplinePoint sp; sp.pos = pos; sp.norm = norms[nearest]; sp.baseOrient = baseOrients[nearest];
+        SplinePoint sp;
+        sp.pos = pos;
+        sp.norm = norms[nearest];
+        sp.tangent = tangent;
+        sp.baseOrient = baseOrients[nearest];
         result.append(sp);
     }
     return result;
@@ -488,30 +506,29 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                         // TODO: Fix stroke orientation mode.
                         else if (orientMode == 2) // Stroke orientation.
                         {
-                            int spIdx = (int)(&sp - spline.data());
-                            UT_Vector3F tangent;
-                            if (spIdx + 1 < spline.size())
-                                tangent = spline[spIdx + 1].pos - sp.pos;
-                            else if (spIdx > 0)
-                                tangent = sp.pos - spline[spIdx - 1].pos;
-                            else
-                                tangent = UT_Vector3F(1, 0, 0);  // fallback
+                            UT_Vector3F fwd = sp.tangent;
 
-                            if (tangent.length() > 1e-6f) tangent.normalize();
+                            fwd -= targetNormal * targetNormal.dot(fwd);
+                            if (fwd.length() < 1e-6f)
+                            {
+                                UT_Vector3F fallback(1, 0, 0);
+                                if (SYSabs(targetNormal.dot(fallback)) > 0.9f)
+                                    fallback = UT_Vector3F(0, 0, 1);
+                                fwd = cross(targetNormal, fallback);
+                            }
+                            fwd.normalize();
 
-                            UT_Vector3F right = cross(tangent, targetNormal);
-                            if (right.length() < 1e-6f)
-                                right = cross(tangent, UT_Vector3F(0, 0, 1));
+                            UT_Vector3F right = cross(targetNormal, fwd);
                             right.normalize();
-                            UT_Vector3F correctedTangent = cross(targetNormal, right);
-                            correctedTangent.normalize();
+
+                            UT_Matrix3F frame;
+                            frame(0, 0) = right.x();         frame(0, 1) = targetNormal.x(); frame(0, 2) = fwd.x();
+                            frame(1, 0) = right.y();         frame(1, 1) = targetNormal.y(); frame(1, 2) = fwd.y();
+                            frame(2, 0) = right.z();         frame(2, 1) = targetNormal.z(); frame(2, 2) = fwd.z();
 
                             UT_QuaternionF strokeRot;
-                            strokeRot.updateFromRotationMatrix(
-                                UT_Matrix3F(right.x(), right.y(), right.z(),
-                                    targetNormal.x(), targetNormal.y(), targetNormal.z(),
-                                    correctedTangent.x(), correctedTangent.y(), correctedTangent.z())
-                            );
+                            strokeRot.updateFromRotationMatrix(frame);
+                            strokeRot.normalize();
                             stampRot = strokeRot;
                         }
                         else // Surface normal orientation (original behaviour).
