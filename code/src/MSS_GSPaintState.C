@@ -50,8 +50,8 @@ MSS_GSPaintState::MSS_GSPaintState(JEDI_View& view, PI_StateTemplate& templ,
     myCurrentStrokeStart = 0;
     myIsPaintMode = 0;
     myHasCurrentHit = false;
-    myCurrentHitPos = UT_Vector3F(0, 0, 0);
     myRayHitPos = UT_Vector3F(0, 0, 0);
+    myRayDir = UT_Vector3F(0, 0, -1);
 
     // build circle cursor geometry
     GU_PrimCircleParms cparms;
@@ -180,6 +180,8 @@ MSS_GSPaintState::enter(BM_SimpleState::BM_EntryType how)
     myStrokeNormals.clear();
     myStrokeLengths.clear();
 	myStrokeBaseOrients.clear();
+    myStrokeRayDirs.clear();
+    myStrokeRayHitPositions.clear();
     myCurrentStrokeStart = 0;
     myIsDrawing = false;
 
@@ -366,8 +368,8 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
         if (bestIdx >= 0)
         {
             myHasCurrentHit = true;
-            myCurrentHitPos = myCachedPoints[bestIdx];
             myRayHitPos = ro + rd * bestT;
+            myRayDir = rd;
         }
         else
         {
@@ -395,8 +397,8 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
             myHasCurrentHit = stampHit;
             if (stampHit)
             {
-                myCurrentHitPos = stampBestPos;
                 myRayHitPos = ro + rd * stampBestT;
+                myRayDir = rd;
             }
         }
 
@@ -437,6 +439,8 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                         myStrokePositions.clear();
                         myStrokeNormals.clear();
                         myStrokeLengths.clear();
+                        myStrokeRayDirs.clear();
+                        myStrokeRayHitPositions.clear();
                         myCurrentStrokeStart = 0;
 
                         printf("[GSPaint] Detected external clear ? resetting strokes.\n");
@@ -512,15 +516,16 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                         hitNorm = UT_Vector3F(nHandle.get(bestOffset));
                     }
 
-                    myCurrentHitPos = hitPos;
                     myRayHitPos = ro + rd * bestT;
-                    myHasCurrentHit = true;
+                    myRayDir = rd;
+                    myHasCurrentHit = true;                  
+
+                    UT_Vector3F rayHitPos = ro + rd * bestT;
 
                     bool tooClose = false;
                     if (myStrokePositions.size() > (exint)myCurrentStrokeStart)
                     {
-                        UT_Vector3F last = myStrokePositions.last();
-                        if ((hitPos - last).length() < myBrushRadius * 0.01f)
+                        if ((rayHitPos - myStrokePositions.last()).length() < myBrushRadius * 0.01f)
                             tooClose = true;
                     }
 
@@ -529,19 +534,13 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                     if (orientHandle.isValid())
                         hitBaseOrient = UT_Vector4F(orientHandle.get(bestOffset));
 
-                    bool tooClose2 = false;
-                    if (myStrokePositions.size() > (exint)myCurrentStrokeStart)
+                    if (!tooClose)
                     {
-                        UT_Vector3F last = myStrokePositions.last();
-                        if ((hitPos - last).length() < myBrushRadius * 0.01f)
-                            tooClose2 = true;
-                    }
-
-                    if (!tooClose && !tooClose2)
-                    {
-                        myStrokePositions.append(hitPos);
+                        myStrokePositions.append(rayHitPos);
                         myStrokeNormals.append(hitNorm);
                         myStrokeBaseOrients.append(hitBaseOrient);
+                        myStrokeRayDirs.append(rd);
+                        myStrokeRayHitPositions.append(rayHitPos);
                     }
 
                 }
@@ -765,6 +764,14 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
 
         bool useTrail = myIsDrawing && (op == 1 || op == 2) && myStrokePositions.size() > (exint)myCurrentStrokeStart;
 
+        auto screenPlaneDist2 = [&](const UT_Vector3F& p, const UT_Vector3F& center) -> float
+            {
+                UT_Vector3F diff = p - center;
+                float along = diff.dot(myRayDir);
+                UT_Vector3F perp = diff - myRayDir * along;
+                return perp.length2();
+            };
+
         // highlight base-scene cached points
         if (myCachedPoints.size() > 0)
         {
@@ -777,7 +784,14 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
                     for (exint s = myCurrentStrokeStart;
                         s < myStrokePositions.size(); s++)
                     {
-                        if ((p - myStrokePositions[s]).length2() <= radius2)
+                        UT_Vector3F savedDir = myStrokeRayDirs[s];
+                        auto dist2 = [&](const UT_Vector3F& pt, const UT_Vector3F& center) {
+                            UT_Vector3F diff = pt - center;
+                            float along = diff.dot(savedDir);
+                            UT_Vector3F perp = diff - savedDir * along;
+                            return perp.length2();
+                            };
+                        if (dist2(p, myStrokeRayHitPositions[s]) <= radius2)
                         {
                             inRange = true; break;
                         }
@@ -785,7 +799,7 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
                 }
                 else
                 {
-                    inRange = (p - myCurrentHitPos).length2() <= radius2;
+                    inRange = screenPlaneDist2(p, myRayHitPos) <= radius2;
                 }
                 if (!inRange) continue;
                 GA_Offset pt = highlightGeo.appendPoint();
@@ -830,7 +844,14 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
                             for (exint s = myCurrentStrokeStart;
                                 s < myStrokePositions.size(); s++)
                             {
-                                if ((testPos - myStrokePositions[s]).length2() <= radius2)
+                                UT_Vector3F savedDir = myStrokeRayDirs[s];
+                                auto dist2 = [&](const UT_Vector3F& pt, const UT_Vector3F& center) {
+                                    UT_Vector3F diff = pt - center;
+                                    float along = diff.dot(savedDir);
+                                    UT_Vector3F perp = diff - savedDir * along;
+                                    return perp.length2();
+                                    };
+                                if (dist2(testPos, myStrokeRayHitPositions[s]) <= radius2)
                                 {
                                     inRange = true; break;
                                 }
@@ -838,7 +859,7 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
                         }
                         else
                         {
-                            inRange = (testPos - myCurrentHitPos).length2() <= radius2;
+                            inRange = screenPlaneDist2(testPos, myRayHitPos) <= radius2;
                         }
                         if (inRange)
                         {
