@@ -662,13 +662,6 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
         }
         else if (operation == 2 && baseGdp) // erase mode
         {
-            UT_Array<UT_Vector3F> allStrokePositions;
-            {
-                GA_Offset ptoff;
-                GA_FOR_ALL_PTOFF(targetGdp, ptoff)
-                    allStrokePositions.append(UT_Vector3F(targetGdp->getPos3(ptoff)));
-            }
-
             // only erase base scene if toggle is on
             if (ERASEBASE(now))
             {
@@ -676,7 +669,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 GA_FOR_ALL_PTOFF(baseGdp, bptoff)
                 {
                     UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(bptoff));
-                    for (const UT_Vector3F& sp : allStrokePositions)
+                    for (const UT_Vector3F& sp : newStrokePositions)
                     {
                         if ((pos - sp).length2() <= radius2)
                         {
@@ -708,7 +701,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
             {
                 GA_Offset ptoff = baseGdp->pointOffset(kv.first);
                 UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(ptoff));
-                for (const UT_Vector3F& sp : allStrokePositions)
+                for (const UT_Vector3F& sp : newStrokePositions)
                 {
                     if ((pos - sp).length2() <= radius2)
                     {
