@@ -33,7 +33,6 @@ namespace HDK_Sample {
         fpreal  OPACITY(fpreal t) { return evalFloat("opacity", 0, t); }
         fpreal  DENSITY(fpreal t) { return evalFloat("density", 0, t); }
         fpreal  BRUSH_RADIUS(fpreal t) { return evalFloat("brush_radius", 0, t); }
-        int     PREVIEWMODE(fpreal t) { return evalInt("preview_mode", 0, t); }
         int     ERASEMODE(fpreal t) { return evalInt("erase_mode", 0, t); }
         int     EVENT(fpreal t) { return evalInt("event", 0, t); }
 

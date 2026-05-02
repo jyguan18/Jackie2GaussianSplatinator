@@ -41,7 +41,6 @@ static PRM_Name names[] = {
     PRM_Name("opacity",      "Opacity"),
     PRM_Name("density",      "Density"),
     PRM_Name("brush_radius", "Brush Radius"),
-    PRM_Name("preview_mode", "Preview Mode"),
     PRM_Name("erase_mode",   "Erase Mode"),
     PRM_Name("origin",       "Origin"),
     PRM_Name("direction",    "Direction"),
@@ -71,7 +70,7 @@ static PRM_Range brushRadiusRange(PRM_RANGE_UI, 0.01f, PRM_RANGE_UI, 5.0f);
 
 // operation tabs
 static PRM_Default switcher_tabs[] = {
-    PRM_Default(5, "Stamp"),   // 5 parms in stamp tab
+    PRM_Default(4, "Stamp"),   // 4 parms in stamp tab
     PRM_Default(6, "Paint"),   // 6 parms in paint tab
     PRM_Default(1, "Erase"),   // 1 parm in erase tab
 };
@@ -119,29 +118,28 @@ SOP_GSPaintBrush::myTemplateList[] =
 
     // shared params above the tabs (brush radius, scale, opacity)
     PRM_Template(PRM_FLT, 1, &names[3], &brushRadiusDefault, nullptr, &brushRadiusRange),
-    PRM_Template(PRM_CALLBACK, 1, &names[9], &buttonDefault, 0, 0,
+    PRM_Template(PRM_CALLBACK, 1, &names[8], &buttonDefault, 0, 0,
                  &SOP_GSPaintBrush::onClearPoints),
 
     // the switcher itself
-    PRM_Template(PRM_SWITCHER, 3, &names[10], switcher_tabs),
+    PRM_Template(PRM_SWITCHER, 3, &names[9], switcher_tabs),
 
     // --- stamp tab ---
     PRM_Template(PRM_FLT,  1, &names[2], &densityDefault,  nullptr, &densityRange),
     PRM_Template(PRM_FLT,  1, &names[0], &scaleDefault,    nullptr, &scaleRange),
     PRM_Template(PRM_FLT,  1, &names[1], &opacityDefault,  nullptr, &opacityRange),
-    PRM_Template(PRM_ORD,  1, &names[18], &orientModeDefault, &orientModeMenu),
-    PRM_Template(PRM_TOGGLE, 1, &names[4]),   // preview mode
+    PRM_Template(PRM_ORD,  1, &names[17], &orientModeDefault, &orientModeMenu),
 
     // --- paint tab ---
-    PRM_Template(PRM_RGB_J, 3, &names[11], paintColorDefault),
-    PRM_Template(PRM_FLT,   1, &names[12], &paintAlphaDefault, nullptr, &opacityRange),
-    PRM_Template(PRM_ORD,      1, &names[13], &colorSourceDefault, &colorSourceMenu),
-    PRM_Template(PRM_TOGGLE,   1, &names[14]),  // modify color
-    PRM_Template(PRM_TOGGLE,   1, &names[15]),  // modify alpha
-    PRM_Template(PRM_TOGGLE,   1, &names[16]),  // modify scale
+    PRM_Template(PRM_RGB_J, 3, &names[10], paintColorDefault),
+    PRM_Template(PRM_FLT,   1, &names[11], &paintAlphaDefault, nullptr, &opacityRange),
+    PRM_Template(PRM_ORD,      1, &names[12], &colorSourceDefault, &colorSourceMenu),
+    PRM_Template(PRM_TOGGLE,   1, &names[13]),  // modify color
+    PRM_Template(PRM_TOGGLE,   1, &names[14]),  // modify alpha
+    PRM_Template(PRM_TOGGLE,   1, &names[15]),  // modify scale
 
     // --- erase tab ---
-    PRM_Template(PRM_TOGGLE, 1, &names[17]),  // erase base scene
+    PRM_Template(PRM_TOGGLE, 1, &names[16]),  // erase base scene
     
     PRM_Template()
 };
