@@ -680,18 +680,41 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 }
             }
 
+            GA_ROHandleV3 tgt_rayDir(targetGdp->findFloatTuple(GA_ATTRIB_POINT, "rayDir", 3));
+
             UT_Array<int> stampKeysToErase;
             for (auto& kv : myStampedGaussians)
             {
-                for (const UT_Vector3F& sp : newStrokePositions)
+                const UT_Vector3F& splatPos = kv.second.pos;
+                bool shouldErase = false;
+                int spIdx = 0;
+                GA_FOR_ALL_PTOFF(targetGdp, ptoff)
                 {
-                    if ((kv.second.pos - sp).length2() <= radius2)
+                    if (spIdx < myLastProcessedStrokeSize - (int)newStrokePositions.size())
                     {
-                        stampKeysToErase.append(kv.first);
+                        spIdx++; continue;
+                    } // only new stroke points
+
+                    UT_Vector3F sp = UT_Vector3F(targetGdp->getPos3(ptoff));
+                    UT_Vector3F rd(0, 0, -1);
+                    if (tgt_rayDir.isValid())
+                        rd = UT_Vector3F(tgt_rayDir.get(ptoff));
+                    rd.normalize();
+
+                    UT_Vector3F diff = splatPos - sp;
+                    float along = diff.dot(rd);
+                    UT_Vector3F perp = diff - rd * along;
+                    if (perp.length2() <= radius2)
+                    {
+                        shouldErase = true;
                         break;
                     }
+                    spIdx++;
                 }
+                if (shouldErase)
+                    stampKeysToErase.append(kv.first);
             }
+
             for (int k : stampKeysToErase)
                 myStampedGaussians.erase(k);
 

@@ -261,9 +261,10 @@ MSS_GSPaintState::flushToStrokeNode(fpreal t, const char* event)
         const UT_Vector3F& n = myStrokeNormals[i];
         const UT_Vector4F& o = myStrokeBaseOrients[i];
         UT_String ns;
-        ns.sprintf("(%g,%g,%g,%g,%g,%g,%g)",
+        ns.sprintf("(%g,%g,%g,%g,%g,%g,%g,%g,%g,%g)",
             n.x(), n.y(), n.z(),
-            o.x(), o.y(), o.z(), o.w());
+            o.x(), o.y(), o.z(), o.w(),
+            myStrokeRayDirs[i].x(), myStrokeRayDirs[i].y(), myStrokeRayDirs[i].z());
         if (i > 0) normStr += ",";
         normStr += ns;
     }
