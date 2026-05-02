@@ -747,7 +747,7 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
         r->popMatrix();
     }
 
-    // draw stroke path preview ? stamp mode only (paint/erase don't need it)
+    // draw stroke path preview and stamp mode only (paint/erase don't need it)
     if (!isPreempted() && myIsDrawing && myStrokePositions.size() > 1 && !isPaintMode)
     {
         int operation = sop ? sop->evalInt("operation", 0, getTime()) : 0;
