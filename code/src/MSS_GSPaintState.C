@@ -351,22 +351,49 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
         mapToWorld(x, y, dir, rayorig);
         UT_Vector3F ro(rayorig), rd(dir);
         rd.normalize();
-
         float bestT = 1e10f;
-        int   bestIdx = -1;
-        for (int i = 0; i < myCachedPoints.size(); i++)
+        bool  hitFound = false;
+
+        // Compute sceneFar from cached points relative to this ray origin.
+        float sceneFar = 200.0f;
+        if (myCachedPoints.size() > 0)
         {
-            const UT_Vector3F& p = myCachedPoints[i];
-            UT_Vector3F op = p - ro;
-            float t_val = op.dot(rd);
-            if (t_val < 0) continue;
-            UT_Vector3F closest = ro + rd * t_val;
-            float dist = (p - closest).length();
-            if (dist > myBrushRadius) continue;
-            if (t_val < bestT) { bestT = t_val; bestIdx = i; }
+            float maxDist = 0.0f;
+            for (int i = 0; i < myCachedPoints.size(); i++)
+            {
+                float d = (myCachedPoints[i] - ro).length();
+                if (d > maxDist) maxDist = d;
+            }
+            sceneFar = maxDist + myBrushRadius;
+        }
+        float stepSize = SYSmax(myBrushRadius, sceneFar / 500.0f);
+
+        GA_OffsetArray candidates;
+        for (float tSample = 0.0f; tSample < sceneFar; tSample += stepSize)
+        {
+            candidates.clear();
+            UT_Vector3 samplePos = ro + rd * tSample;
+            myPointTree->findAllCloseIdx(samplePos, myBrushRadius, candidates);
+
+            for (exint i = 0; i < candidates.size(); i++)
+            {
+                GA_Offset off = candidates(i);
+                UT_Vector3F p = myCanvasGdp->getPos3(off);
+                UT_Vector3F op = p - ro;
+                float t_val = op.dot(rd);
+                if (t_val < 0) continue;
+                UT_Vector3F closest = ro + rd * t_val;
+                float dist = (p - closest).length();
+                if (dist > myBrushRadius) continue;
+                if (t_val < bestT)
+                {
+                    bestT = t_val;
+                    hitFound = true;
+                }
+            }
         }
 
-        if (bestIdx >= 0)
+        if (hitFound)
         {
             myHasCurrentHit = true;
             myRayHitPos = ro + rd * bestT;
@@ -374,10 +401,8 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
         }
         else
         {
-            // no base point hit ? search stamp centers so the cursor
-            // aligns correctly when hovering over stamped geometry
+            // Fall through to stamp center search (keep your existing block unchanged)
             float stampBestT = 1e10f;
-            UT_Vector3F stampBestPos;
             bool stampHit = false;
             for (int i = 0; i < myStampCenters.size(); i++)
             {
@@ -391,7 +416,6 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                 if (t_val < stampBestT)
                 {
                     stampBestT = t_val;
-                    stampBestPos = p;
                     stampHit = true;
                 }
             }
@@ -470,7 +494,21 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                 GA_OffsetArray candidates;
 
                 // sample along ray.
-                for (float tSample = 0.0f; tSample < 200.0f; tSample += myBrushRadius)
+                float sceneFar = 200.0f; // Default sceneFar.
+                if (myCachedPoints.size() > 0)
+                {
+                    float maxDist = 0.0f;
+                    for (int i = 0; i < myCachedPoints.size(); i++)
+                    {
+                        float d = (myCachedPoints[i] - ro).length();
+                        if (d > maxDist) maxDist = d;
+                    }
+                    sceneFar = maxDist + myBrushRadius;
+                }
+
+                float stepSize = SYSmax(myBrushRadius, sceneFar / 500.0f);
+
+                for (float tSample = 0.0f; tSample < sceneFar; tSample += stepSize)
                 {
                     candidates.clear();
 

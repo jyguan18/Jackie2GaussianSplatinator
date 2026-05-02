@@ -350,6 +350,8 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
         // collect only NEW stroke positions
         // collect only NEW stroke positions
         UT_Array<UT_Vector3F> newStrokePositions;
+        // Add a rayDir attribute.
+        UT_Array<UT_Vector3F> newStrokeRayDirs;
         int idx = 0;
         GA_Offset ptoff;
         /*bool useAllStrokePoints = parmChanged;*/
@@ -358,6 +360,26 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
         // read piece attribute once outside the loop
         GA_ROHandleI pieceHandle(targetGdp->findIntTuple(GA_ATTRIB_POINT, "piece", 1));
         UT_Set<int> newPiecesThisCook;
+
+        GA_ROHandleV3 tgt_rayDir_erase(targetGdp->findFloatTuple(GA_ATTRIB_POINT, "rayDir", 3));
+        {
+            int idx = 0;
+            GA_Offset ptoff;
+            GA_FOR_ALL_PTOFF(targetGdp, ptoff)
+            {
+                if (useAllStrokePoints || idx >= myLastProcessedStrokeSize)
+                {
+                    UT_Vector3F rd(0, 0, -1);
+                    if (tgt_rayDir_erase.isValid())
+                    {
+                        rd = UT_Vector3F(tgt_rayDir_erase.get(ptoff));
+                        rd.normalize();
+                    }
+                    newStrokeRayDirs.append(rd);
+                }
+                idx++;
+            }
+        }
 
         GA_FOR_ALL_PTOFF(targetGdp, ptoff)
         {
@@ -581,15 +603,19 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
             GA_FOR_ALL_PTOFF(baseGdp, bptoff)
             {
                 UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(bptoff));
-                float minDist2 = 1e10f;
-                for (const UT_Vector3F& sp : newStrokePositions)
+                float minPerp2 = 1e10f;
+                for (exint si = 0; si < newStrokePositions.size(); si++)
                 {
-                    float d2 = (pos - sp).length2();
-                    if (d2 < minDist2) minDist2 = d2;
+                    const UT_Vector3F& sp = newStrokePositions[si];
+                    const UT_Vector3F& rd = newStrokeRayDirs[si];
+                    UT_Vector3F diff = pos - sp;
+                    float along = diff.dot(rd);
+                    UT_Vector3F perp = diff - rd * along;
+                    float d2 = perp.length2();
+                    if (d2 < minPerp2) minPerp2 = d2;
                 }
-                if (minDist2 > radius2) continue;
-
-                float dist = SYSsqrt(minDist2);
+                if (minPerp2 > radius2) continue;
+                float dist = SYSsqrt(minPerp2);
                 float falloff = 1.0f - (dist / brushRadius);
                 float blend = paintAlpha * falloff;
                 float inv = 1.0f - blend;
@@ -647,9 +673,17 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 GA_FOR_ALL_PTOFF(baseGdp, bptoff)
                 {
                     UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(bptoff));
-                    for (const UT_Vector3F& sp : newStrokePositions)
+                    for (exint si = 0; si < newStrokePositions.size(); si++)
                     {
-                        if ((pos - sp).length2() <= radius2)
+                        const UT_Vector3F& sp = newStrokePositions[si];
+                        const UT_Vector3F& rd = newStrokeRayDirs[si];
+
+                        // Cylinder test: perpendicular distance from point to ray
+                        UT_Vector3F diff = pos - sp;
+                        float along = diff.dot(rd);
+                        UT_Vector3F perp = diff - rd * along;
+
+                        if (perp.length2() <= radius2)
                         {
                             myErasedPoints.insert(baseGdp->pointIndex(bptoff));
                             break;
