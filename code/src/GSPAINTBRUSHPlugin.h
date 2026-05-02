@@ -20,7 +20,6 @@ namespace HDK_Sample {
         SOP_GSPaintBrush(OP_Network* net, const char* name, OP_Operator* op);
         virtual ~SOP_GSPaintBrush();
 
-        virtual unsigned     disableParms();
         virtual OP_ERROR     cookMySop(OP_Context& context);
         virtual bool         evalVariableValue(fpreal& val, int index, int thread);
         virtual bool         evalVariableValue(UT_String& v, int i, int thread)
@@ -85,10 +84,6 @@ namespace HDK_Sample {
         UT_Map<int, GaussianAttribs> myStampedGaussians;
         // Stamp ID counter.
         int myNextStampId;
-
-        // ---- OLD CODE ----
-        // stamp mode: accumulated stamped Gaussians
-        /*UT_Array<GaussianAttribs> myStampedGaussians;*/
 
         // paint mode: per-point color overrides (keyed by point index in base scene)
         UT_Map<GA_Index, GaussianAttribs> myPaintedAttribs;
