@@ -8,6 +8,9 @@
 #include <UT/UT_Array.h>
 #include <GA/GA_Types.h>
 
+// For kd tree.
+#include <GEO/GEO_PointTree.h>
+
 namespace HDK_Sample {
     class SOP_GSPaintBrush : public SOP_Node
     {
@@ -15,6 +18,22 @@ namespace HDK_Sample {
         static OP_Node* myConstructor(OP_Network*, const char*, OP_Operator*);
         static PRM_Template  myTemplateList[];
         static CH_LocalVariable myVariables[];
+
+        GEO_PointTreeGAOffset* getBaseKDTree() const
+        {
+            return myBaseKDTree.get();
+        }
+
+        void setBaseKDTree(std::unique_ptr<GEO_PointTreeGAOffset>&& tree, exint frame)
+        {
+            myBaseKDTree = std::move(tree);
+            myBaseKDBuildFrame = frame;
+        }
+
+        bool hasValidBaseKDTree(exint frame) const
+        {
+            return myBaseKDTree && myBaseKDBuildFrame == frame;
+        }
 
     protected:
         SOP_GSPaintBrush(OP_Network* net, const char* name, OP_Operator* op);
@@ -97,6 +116,17 @@ namespace HDK_Sample {
 
         // track last processed stroke length to avoid reprocessing
         int myLastProcessedStrokeSize;
+
+        std::unique_ptr<GEO_PointTreeGAOffset> myBaseKDTree;
+        exint myBaseKDBuildFrame = -1;
+
+        std::unique_ptr<GEO_PointTreeGAOffset> myStampKDTree;
+
+        UT_Array<GA_Offset> myStampPointOffsets;
+        UT_Array<UT_Vector3F> myStampPositions;
+
+        GU_Detail myTempStampGeo;
+        UT_Array<int> myStampKeyOrder;
 
         int  myCurrPoint;
         int  myTotalPoints;

@@ -261,18 +261,14 @@ buildSpline(const UT_Array<UT_Vector3F>& pts,
     for (int i = 0; i < n_samples; i++)
     {
         float t = total * (float)i / (float)(n_samples - 1);
-        UT_Vector3F pos = catmullRom(pts, arc, t);
 
+        UT_Vector3F pos = catmullRom(pts, arc, t);
         float t0 = SYSmax(0.f, t - eps);
         float t1 = SYSmin(total, t + eps);
-        UT_Vector3F tangent = catmullRom(pts, arc, t1) - catmullRom(pts, arc, t0);
-        if (tangent.length() < 1e-6f)
-        {
-            tangent = (i + 1 < n_samples)
-                ? catmullRom(pts, arc, SYSmin(total, t + eps * 10.f)) - pos
-                : pos - catmullRom(pts, arc, SYSmax(0.f, t - eps * 10.f));
-        }
-        tangent.normalize();
+
+        UT_Vector3F p0 = (t0 == t) ? pos : catmullRom(pts, arc, t0);
+        UT_Vector3F p1 = (t1 == t) ? pos : catmullRom(pts, arc, t1);
+        UT_Vector3F tangent = p1 - p0;
 
         int nearest = 0; float best = SYSabs(arc[0] - t);
         for (int j = 1; j < n; j++)
@@ -338,6 +334,16 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
 
     // ── get current stroke points ─────────────────────────────────────────
     const GU_Detail* targetGdp = inputGeo(1, context);
+
+    if (baseGdp && (!myBaseKDTree || parmChanged))
+    {
+        myBaseKDTree.reset(new GEO_PointTreeGAOffset());
+        GA_OffsetArray offsets;
+        GA_Offset ptoff;
+        GA_FOR_ALL_PTOFF(baseGdp, ptoff)
+            offsets.append(ptoff);
+        myBaseKDTree->build(baseGdp, offsets, true);
+    }
 
     // ── process NEW stroke points since last cook ─────────────────────────
     if (targetGdp && (targetGdp->getNumPoints() > myLastProcessedStrokeSize || parmChanged))
@@ -465,25 +471,32 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 std::map<int, UT_Array<UT_Vector3F>> strokePts, strokeNorms;
                 std::map<int, UT_Array<UT_Vector4F>> strokeBaseOrients;
                 const UT_Vector3F stampUpDir(0, 1, 0);
+                // Iterate only through new strokes, not entire history. 
                 {
                     GA_Offset ptoff;
+                    int idx2 = 0;
+                    int newStart = myLastProcessedStrokeSize - (int)newStrokePositions.size();
                     GA_FOR_ALL_PTOFF(targetGdp, ptoff)
                     {
-                        int piece = tgt_strokeId.isValid() ? tgt_strokeId.get(ptoff) : 0;
-                        UT_Vector3F pos = targetGdp->getPos3(ptoff);
-                        UT_Vector3F norm = stampUpDir;
-                        if (tgt_normal.isValid())
+                        if (idx2 >= newStart)
                         {
-                            UT_Vector3F n = tgt_normal.get(ptoff);
-                            if (n.length() > 1e-6f) { n.normalize(); norm = n; }
-                        }
-                        strokePts[piece].append(pos);
-                        strokeNorms[piece].append(norm);
+                            int piece = tgt_strokeId.isValid() ? tgt_strokeId.get(ptoff) : 0;
+                            UT_Vector3F pos = targetGdp->getPos3(ptoff);
+                            UT_Vector3F norm = stampUpDir;
+                            if (tgt_normal.isValid())
+                            {
+                                UT_Vector3F n = tgt_normal.get(ptoff);
+                                if (n.length() > 1e-6f) { n.normalize(); norm = n; }
+                            }
+                            strokePts[piece].append(pos);
+                            strokeNorms[piece].append(norm);
 
-                        UT_Vector4F bOrient(0.f, 0.f, 0.f, 1.f);
-                        if (tgt_baseOrient.isValid())
-                            bOrient = UT_Vector4F(tgt_baseOrient.get(ptoff));
-                        strokeBaseOrients[piece].append(bOrient);
+                            UT_Vector4F bOrient(0.f, 0.f, 0.f, 1.f);
+                            if (tgt_baseOrient.isValid())
+                                bOrient = UT_Vector4F(tgt_baseOrient.get(ptoff));
+                            strokeBaseOrients[piece].append(bOrient);
+                        }
+                        idx2++;
                     }
                 }
 
@@ -577,9 +590,27 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                                 rotated.z(), rotated.w());
 
                             myStampedGaussians[myNextStampId++] = a;
+                            myStampPositions.append(a.pos);
                         }
                     }
                 }
+            }
+            // Build stamp kd tree.
+            if (!myStampedGaussians.empty())
+            {
+                myStampKeyOrder.clear();
+                myStampPointOffsets.clear();
+                myTempStampGeo.clearAndDestroy();
+
+                for (auto& kv : myStampedGaussians)
+                {
+                    GA_Offset ptoff = myTempStampGeo.appendPoint();
+                    myTempStampGeo.setPos3(ptoff, UT_Vector3(kv.second.pos));
+                    myStampPointOffsets.append(ptoff);
+                    myStampKeyOrder.append(kv.first); // store the map key
+                }
+                myStampKDTree.reset(new GEO_PointTreeGAOffset());
+                myStampKDTree->build(&myTempStampGeo, myStampPointOffsets, true);
             }
         }
         else if (operation == 1 && baseGdp) // paint mode
@@ -598,21 +629,42 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
             GA_ROHandleV3 src_scale(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "scale", 3));
             GA_ROHandleV4 src_orient(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
 
-            GA_FOR_ALL_PTOFF(baseGdp, bptoff)
+            UT_Set<GA_Offset> uniqueHits;
+
+            for (exint si = 0; si < newStrokePositions.size(); si++)
+            {
+                UT_Array<GA_Offset> hits;
+                myBaseKDTree->findAllCloseIdx(
+                    newStrokePositions[si],
+                    brushRadius,
+                    hits
+                );
+
+                for (auto h : hits)
+                    uniqueHits.insert(h);
+            }
+            
+            for (GA_Offset bptoff : uniqueHits)
             {
                 UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(bptoff));
+
                 float minPerp2 = 1e10f;
+
                 for (exint si = 0; si < newStrokePositions.size(); si++)
                 {
                     const UT_Vector3F& sp = newStrokePositions[si];
                     const UT_Vector3F& rd = newStrokeRayDirs[si];
+
                     UT_Vector3F diff = pos - sp;
                     float along = diff.dot(rd);
                     UT_Vector3F perp = diff - rd * along;
+
                     float d2 = perp.length2();
                     if (d2 < minPerp2) minPerp2 = d2;
                 }
+
                 if (minPerp2 > radius2) continue;
+
                 float dist = SYSsqrt(minPerp2);
                 float falloff = 1.0f - (dist / brushRadius);
                 float blend = paintAlpha * falloff;
@@ -620,51 +672,78 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
 
                 GA_Index ptnum = baseGdp->pointIndex(bptoff);
 
-                // check if already painted
                 auto it = myPaintedAttribs.find(ptnum);
                 if (it == myPaintedAttribs.end())
                 {
-                    // first time painting this point — initialize from base
                     GaussianAttribs newAttribs;
                     newAttribs.cd = src_cd.isValid() ? UT_Vector3F(src_cd.get(bptoff)) : UT_Vector3F(1, 1, 1);
                     newAttribs.alpha = src_alpha.isValid() ? src_alpha.get(bptoff) : 1.f;
                     newAttribs.scale = src_scale.isValid() ? UT_Vector3F(src_scale.get(bptoff)) : UT_Vector3F(0, 0, 0);
                     newAttribs.orient = src_orient.isValid() ? UT_Vector4F(src_orient.get(bptoff)) : UT_Vector4F(0, 0, 0, 1);
+
                     myPaintedAttribs[ptnum] = newAttribs;
                     it = myPaintedAttribs.find(ptnum);
                 }
 
                 GaussianAttribs& attribs = it->second;
+
                 if (modifyCd)
                     attribs.cd = attribs.cd * inv + paintColor * blend;
+
                 if (modifyAlpha)
                     attribs.alpha = attribs.alpha * inv + blend;
             }
-            for (auto& kv : myStampedGaussians)
+            // Change stamp query to kd tree.
+            UT_Array<GA_Offset> hitStamps;
+
+            for (exint si = 0; si < newStrokePositions.size(); si++)
             {
-                GaussianAttribs& a = kv.second;
-                float minPerp2 = 1e10f;
-                for (exint si = 0; si < newStrokePositions.size(); si++)
+                hitStamps.clear();
+
+                if (myStampKDTree)
                 {
-                    const UT_Vector3F& sp = newStrokePositions[si];
-                    const UT_Vector3F& rd = newStrokeRayDirs[si];
-                    UT_Vector3F diff = a.pos - sp;
-                    float along = diff.dot(rd);
-                    UT_Vector3F perp = diff - rd * along;
-                    float d2 = perp.length2();
-                    if (d2 < minPerp2) minPerp2 = d2;
+                    UT_Array<GA_Offset> hitStamps;
+                    for (exint si = 0; si < newStrokePositions.size(); si++)
+                    {
+                        myStampKDTree->findAllCloseIdx(
+                            newStrokePositions[si],
+                            brushRadius,
+                            hitStamps
+                        );
+
+                        for (GA_Offset hit : hitStamps)
+                        {
+                            int keyIdx = (int)hit;
+                            if (keyIdx < 0 || keyIdx >= myStampKeyOrder.size()) continue;
+                            int mapKey = myStampKeyOrder[keyIdx];
+                            auto it = myStampedGaussians.find(mapKey);
+                            if (it == myStampedGaussians.end()) continue;
+                            GaussianAttribs& a = it->second;
+                            
+                            float minPerp2 = 1e10f;
+
+                            for (const auto& sp : newStrokePositions)
+                            {
+                                UT_Vector3F diff = a.pos - sp;
+                                float d2 = diff.length2();
+                                if (d2 < minPerp2) minPerp2 = d2;
+                            }
+
+                            if (minPerp2 > radius2) continue;
+
+                            float dist = SYSsqrt(minPerp2);
+                            float falloff = 1.0f - (dist / brushRadius);
+                            float blend = paintAlpha * falloff;
+                            float inv = 1.0f - blend;
+
+                            if (modifyCd)
+                                a.cd = a.cd * inv + paintColor * blend;
+
+                            if (modifyAlpha)
+                                a.alpha = SYSclamp(a.alpha * inv + blend, 0.f, 1.f);
+                        }
+                    }
                 }
-                if (minPerp2 > radius2) continue;
-
-                float dist = SYSsqrt(minPerp2);
-                float falloff = 1.0f - (dist / brushRadius);
-                float blend = paintAlpha * falloff;
-                float inv = 1.0f - blend;
-
-                if (modifyCd)
-                    a.cd = a.cd * inv + paintColor * blend;
-                if (modifyAlpha)
-                    a.alpha = SYSclamp(a.alpha * inv + blend, 0.f, 1.f);
             }
         }
         else if (operation == 2 && baseGdp) // erase mode
@@ -672,16 +751,29 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
             // only erase base scene if toggle is on
             if (ERASEBASE(now))
             {
-                GA_Offset bptoff;
-                GA_FOR_ALL_PTOFF(baseGdp, bptoff)
+                UT_Set<GA_Offset> eraseHits;
+
+                for (exint si = 0; si < newStrokePositions.size(); si++)
+                {
+                    UT_Array<GA_Offset> hits;
+                    myBaseKDTree->findAllCloseIdx(
+                        newStrokePositions[si],
+                        brushRadius,
+                        hits
+                    );
+
+                    for (auto h : hits)
+                        eraseHits.insert(h);
+                }
+                for (GA_Offset bptoff : eraseHits)
                 {
                     UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(bptoff));
+
                     for (exint si = 0; si < newStrokePositions.size(); si++)
                     {
                         const UT_Vector3F& sp = newStrokePositions[si];
                         const UT_Vector3F& rd = newStrokeRayDirs[si];
 
-                        // Cylinder test: perpendicular distance from point to ray
                         UT_Vector3F diff = pos - sp;
                         float along = diff.dot(rd);
                         UT_Vector3F perp = diff - rd * along;

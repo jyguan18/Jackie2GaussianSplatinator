@@ -8,6 +8,9 @@
 // For kd tree.
 #include <GEO/GEO_PointTree.h>
 
+// Include PaintBrush plugin.
+# include "GSPAINTBRUSHPlugin.h"
+
 class JEDI_View;
 
 namespace HDK_Sample {
@@ -55,6 +58,11 @@ namespace HDK_Sample {
         UT_Vector3F myCursorWorldPos;
         UT_Vector3F myCursorRight;
 
+        bool myRayCacheDirty = true;
+        exint myCachedPointCount = -1;
+        const GU_Detail* myLastGeo = nullptr;
+
+        const GU_Detail* getCanvasGeo(SOP_Node* sop, OP_Context& ctx) const;
 
         // stroke points accumulated during drag
         UT_Array<UT_Vector3F> myStrokePositions;

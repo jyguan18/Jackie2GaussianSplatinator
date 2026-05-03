@@ -29,6 +29,18 @@ newModelState(BM_ResourceManager* m)
             0));
 }
 
+const GU_Detail*
+MSS_GSPaintState::getCanvasGeo(SOP_Node* sop, OP_Context& ctx) const
+{
+    if (!sop) return nullptr;
+    OP_Node* inputNode = sop->getInput(2);
+    if (!inputNode) inputNode = sop->getInput(0);
+    if (!inputNode) return nullptr;
+    SOP_Node* inputSop = dynamic_cast<SOP_Node*>(inputNode);
+    if (!inputSop) return nullptr;
+    return inputSop->getCookedGeo(ctx);
+}
+
 PRM_Template* MSS_GSPaintState::ourTemplateList = 0;
 
 BM_State*
@@ -78,93 +90,80 @@ MSS_GSPaintState::className() const
 void
 MSS_GSPaintState::handleOpNodeChange(OP_Node& node)
 {
-    MSS_SingleOpState::handleOpNodeChange(node);
     myStampCenters.clear();
+    MSS_SingleOpState::handleOpNodeChange(node);
+
     SOP_Node* sop = dynamic_cast<SOP_Node*>(&node);
-    if (sop)
+    if (!sop) return;
+
+    OP_Context ctx(getTime());
+    const GU_Detail* outGdp = sop->getCookedGeo(ctx);
+
+    if (outGdp && (outGdp != myLastGeo || outGdp->getNumPoints() != myCachedPointCount))
     {
-        OP_Context ctx(getTime());
-        const GU_Detail* outGdp = sop->getCookedGeo(ctx);
-        OP_Node* baseInput = sop->getInput(2);
-        int baseCount = 0;
-        if (baseInput)
+        myRayCacheDirty = true;
+        myLastGeo = outGdp;
+        myCachedPointCount = (exint)outGdp->getNumPoints();
+    }
+    OP_Node* baseInput = sop->getInput(2);
+    int baseCount = 0;
+    if (baseInput)
+    {
+        SOP_Node* baseSop = dynamic_cast<SOP_Node*>(baseInput);
+        if (baseSop)
         {
-            SOP_Node* baseSop = dynamic_cast<SOP_Node*>(baseInput);
-            if (baseSop)
-            {
-                const GU_Detail* baseGeo = baseSop->getCookedGeo(ctx);
-                if (baseGeo) baseCount = (int)baseGeo->getNumPoints();
-            }
-        }
-        if (outGdp)
-        {
-            GA_ROHandleV3 scHandle(outGdp->findFloatTuple(GA_ATTRIB_POINT, "stampCenter", 3));
-            int outIdx = 0;
-            GA_Offset ptoff;
-            GA_FOR_ALL_PTOFF(outGdp, ptoff)
-            {
-                if (outIdx >= baseCount && scHandle.isValid())
-                    myStampCenters.append(UT_Vector3F(scHandle.get(ptoff)));
-                outIdx++;
-            }
+            const GU_Detail* baseGeo = baseSop->getCookedGeo(ctx);
+            if (baseGeo) baseCount = (int)baseGeo->getNumPoints();
         }
     }
-
+    if (outGdp)
+    {
+        GA_ROHandleV3 scHandle(outGdp->findFloatTuple(GA_ATTRIB_POINT, "stampCenter", 3));
+        int outIdx = 0;
+        GA_Offset ptoff;
+        GA_FOR_ALL_PTOFF(outGdp, ptoff)
+        {
+            if (outIdx >= baseCount && scHandle.isValid())
+                myStampCenters.append(UT_Vector3F(scHandle.get(ptoff)));
+            outIdx++;
+        }
+    }
     redrawScene();
 }
 
 void
 MSS_GSPaintState::buildRayIntersect()
 {
+    if (!myRayCacheDirty)
+        return;
+
     myCachedPoints.clear();
-    //myCachedNormals.clear();
-    myCanvasGdp = nullptr;
+    myCachedNormals.clear();
 
     SOP_Node* sop = (SOP_Node*)getNode();
     if (!sop) return;
 
     OP_Context context(getTime());
-
-    // try input 2 first (base Gaussian scene), then input 0 (brush stamp)
-    OP_Node* inputNode = sop->getInput(2);
-    if (!inputNode) inputNode = sop->getInput(0);
-    if (!inputNode) return;
-
-    SOP_Node* inputSop = dynamic_cast<SOP_Node*>(inputNode);
-    if (!inputSop) return;
-
-    const GU_Detail* geo = inputSop->getCookedGeo(context);
+    const GU_Detail* geo = getCanvasGeo(sop, context);
     if (!geo) return;
 
-    myCanvasGdp = geo;
-
-    GA_OffsetArray offsetTree;
-
-    // cache all point positions
     GA_ROHandleV3 nHandle(geo->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
 
     GA_Offset ptoff;
     GA_FOR_ALL_PTOFF(geo, ptoff)
     {
-        offsetTree.append(ptoff);
-
-        myCachedPoints.append(
-            UT_Vector3F(geo->getPos3(ptoff)));
-
+        myCachedPoints.append(UT_Vector3F(geo->getPos3(ptoff)));
         if (nHandle.isValid())
-            myCachedNormals.append(
-                UT_Vector3F(nHandle.get(ptoff)));
+            myCachedNormals.append(UT_Vector3F(nHandle.get(ptoff)));
         else
-            myCachedNormals.append(
-                UT_Vector3F(0, 1, 0));
+            myCachedNormals.append(UT_Vector3F(0, 1, 0));
     }
-
-    myPointTree.reset(new GEO_PointTreeGAOffset());
-    myPointTree->build(geo, offsetTree, true);
 
     printf("[GSPaint] Cached %d Gaussian points for painting\n",
         (int)myCachedPoints.size());
     fflush(stdout);
+
+    myRayCacheDirty = false;
 }
 
 int
@@ -230,33 +229,28 @@ void
 MSS_GSPaintState::flushToStrokeNode(fpreal t, const char* event)
 {
     SOP_Node* sop = (SOP_Node*)getNode();
-    if (!sop) { printf("[GSPaint] No SOP node!\n"); return; }
-
+    if (!sop) return;
     OP_Network* net = sop->getParent();
-    if (!net) { printf("[GSPaint] No parent network!\n"); return; }
-
+    if (!net) return;
     OP_Node* strokeNode = net->findNode("stroke_points");
-    if (!strokeNode) { printf("[GSPaint] stroke_points not found!\n"); return; }
+    if (!strokeNode) return;
 
-    printf("[GSPaint] Flushing %d positions, event=%s\n",
-        (int)myStrokePositions.size(), event);
-    fflush(stdout);
+    int flushStart = (strcmp(event, "end") == 0) ? 0 : myCurrentStrokeStart;
 
-    // build position and normal strings
-    UT_String posStr, normStr, lengthStr, orientStr;
+    UT_String posStr, normStr, lengthStr;
     posStr = "[";
-    for (int i = 0; i < myStrokePositions.size(); i++)
+    for (int i = flushStart; i < myStrokePositions.size(); i++)
     {
         const UT_Vector3F& p = myStrokePositions[i];
-        UT_String ps, ns;
+        UT_String ps;
         ps.sprintf("(%g,%g,%g)", p.x(), p.y(), p.z());
-        if (i > 0) { posStr += ","; }
+        if (i > flushStart) posStr += ",";
         posStr += ps;
     }
     posStr += "]";
 
     normStr = "[";
-    for (int i = 0; i < myStrokePositions.size(); i++)
+    for (int i = flushStart; i < myStrokePositions.size(); i++)
     {
         const UT_Vector3F& n = myStrokeNormals[i];
         const UT_Vector4F& o = myStrokeBaseOrients[i];
@@ -265,7 +259,7 @@ MSS_GSPaintState::flushToStrokeNode(fpreal t, const char* event)
             n.x(), n.y(), n.z(),
             o.x(), o.y(), o.z(), o.w(),
             myStrokeRayDirs[i].x(), myStrokeRayDirs[i].y(), myStrokeRayDirs[i].z());
-        if (i > 0) normStr += ",";
+        if (i > flushStart) normStr += ",";
         normStr += ns;
     }
     normStr += "]";
@@ -291,16 +285,11 @@ MSS_GSPaintState::flushToStrokeNode(fpreal t, const char* event)
         sop->forceRecook();
         OP_Context cookContext2(t);
         sop->getCookedGeo(cookContext2);
-        // touch stroke_points to propagate the dirty flag through the
-        // full downstream network so display nodes pick up the erase
-        if (strokeNode)
-        {
-            UT_String cur;
-            strokeNode->evalString(cur, "point_positions", 0, t);
-            strokeNode->setString(cur, CH_STRING_LITERAL, "point_positions", 0, t);
-            OP_Context cookContext3(t);
-            strokeNode->cook(cookContext3);
-        }
+        UT_String cur;
+        strokeNode->evalString(cur, "point_positions", 0, t);
+        strokeNode->setString(cur, CH_STRING_LITERAL, "point_positions", 0, t);
+        OP_Context cookContext3(t);
+        strokeNode->cook(cookContext3);
     }
 
     redrawScene();
@@ -314,7 +303,7 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
 
     fpreal t = getTime();
     fpreal paramRadius = sop->evalFloat("brush_radius", 0, t);
-    if (!myResizingCursor)  // don't override if user is manually resizing
+    if (!myResizingCursor)
         myBrushRadius = (float)paramRadius;
 
     int operation = sop->evalInt("operation", 0, t);
@@ -323,7 +312,7 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
     int x = event->state.values[X];
     int y = event->state.values[Y];
 
-    // resize cursor with shift/alt drag
+    // Resize brush.
     if (event->reason == UI_VALUE_START &&
         (event->state.altFlags & UI_ALT_KEY ||
             event->state.altFlags & UI_SHIFT_KEY))
@@ -337,58 +326,67 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
         float dist = x - myLastCursorX + y - myLastCursorY;
         myBrushRadius *= powf(1.01f, dist);
         myBrushRadius = SYSmax(myBrushRadius, 0.01f);
-
         sop->setFloat("brush_radius", 0, t, myBrushRadius);
-
         if (event->reason == UI_VALUE_CHANGED)
             myResizingCursor = false;
         updateBrush(myResizeCursorX, myResizeCursorY);
     }
+
+    // Hover UI.
     else if (event->reason == UI_VALUE_LOCATED)
     {
-        // find hover hit for highlight preview
         UT_Vector3 rayorig, dir;
         mapToWorld(x, y, dir, rayorig);
         UT_Vector3F ro(rayorig), rd(dir);
         rd.normalize();
+
         float bestT = 1e10f;
-        bool  hitFound = false;
+        bool hitFound = false;
 
-        // Compute sceneFar from cached points relative to this ray origin.
-        float sceneFar = 200.0f;
-        if (myCachedPoints.size() > 0)
+        // Get tree and canvas geo once, before the sample loop.
+        SOP_GSPaintBrush* paintSop = dynamic_cast<SOP_GSPaintBrush*>(sop);
+        GEO_PointTreeGAOffset* tree = paintSop ? paintSop->getBaseKDTree() : nullptr;
+
+        OP_Context ctx(t);
+        const GU_Detail* canvasGdp = getCanvasGeo(sop, ctx);
+
+        if (tree && canvasGdp)
         {
-            float maxDist = 0.0f;
-            for (int i = 0; i < myCachedPoints.size(); i++)
+            float sceneFar = 200.0f;
+            if (myCachedPoints.size() > 0)
             {
-                float d = (myCachedPoints[i] - ro).length();
-                if (d > maxDist) maxDist = d;
-            }
-            sceneFar = maxDist + myBrushRadius;
-        }
-        float stepSize = SYSmax(myBrushRadius, sceneFar / 500.0f);
-
-        GA_OffsetArray candidates;
-        for (float tSample = 0.0f; tSample < sceneFar; tSample += stepSize)
-        {
-            candidates.clear();
-            UT_Vector3 samplePos = ro + rd * tSample;
-            myPointTree->findAllCloseIdx(samplePos, myBrushRadius, candidates);
-
-            for (exint i = 0; i < candidates.size(); i++)
-            {
-                GA_Offset off = candidates(i);
-                UT_Vector3F p = myCanvasGdp->getPos3(off);
-                UT_Vector3F op = p - ro;
-                float t_val = op.dot(rd);
-                if (t_val < 0) continue;
-                UT_Vector3F closest = ro + rd * t_val;
-                float dist = (p - closest).length();
-                if (dist > myBrushRadius) continue;
-                if (t_val < bestT)
+                float maxDist = 0.0f;
+                for (int i = 0; i < myCachedPoints.size(); i++)
                 {
-                    bestT = t_val;
-                    hitFound = true;
+                    float d = (myCachedPoints[i] - ro).length();
+                    if (d > maxDist) maxDist = d;
+                }
+                sceneFar = maxDist + myBrushRadius;
+            }
+            float stepSize = SYSmax(myBrushRadius, sceneFar / 500.0f);
+
+            GA_OffsetArray hits;
+            for (float tSample = 0.0f; tSample < sceneFar; tSample += stepSize)
+            {
+                hits.clear();
+                UT_Vector3 samplePos = ro + rd * tSample;
+                tree->findAllCloseIdx(samplePos, myBrushRadius, hits);
+
+                for (exint i = 0; i < hits.size(); i++)
+                {
+                    GA_Offset off = hits(i);
+                    UT_Vector3F p = canvasGdp->getPos3(off);
+                    UT_Vector3F op = p - ro;
+                    float t_val = op.dot(rd);
+                    if (t_val < 0) continue;
+                    UT_Vector3F closest = ro + rd * t_val;
+                    float dist = (p - closest).length();
+                    if (dist > myBrushRadius) continue;
+                    if (t_val < bestT)
+                    {
+                        bestT = t_val;
+                        hitFound = true;
+                    }
                 }
             }
         }
@@ -401,7 +399,7 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
         }
         else
         {
-            // Fall through to stamp center search (keep your existing block unchanged)
+            // Fall back to stamp center search.
             float stampBestT = 1e10f;
             bool stampHit = false;
             for (int i = 0; i < myStampCenters.size(); i++)
@@ -429,17 +427,12 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
 
         updateBrush(x, y);
     }
+
+    // Painting stroke.
     else
     {
-        // painting stroke
         UT_Vector3 rayorig, dir;
         mapToWorld(x, y, dir, rayorig);
-
-        GA_Offset nearest = myPointTree->findNearestIdx(UT_Vector3(rayorig));
-
-        // keeping in world space so no transformations
-        /*xformToObjectCoord(rayorig);
-        xformToObjectVector(dir);*/
 
         bool begin = (event->reason == UI_VALUE_START ||
             event->reason == UI_VALUE_PICKED);
@@ -450,7 +443,6 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
 
         if (begin)
         {
-            // check if stroke_points was externally cleared
             OP_Network* net = sop->getParent();
             if (net)
             {
@@ -467,12 +459,10 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                         myStrokeRayDirs.clear();
                         myStrokeRayHitPositions.clear();
                         myCurrentStrokeStart = 0;
-
-                        printf("[GSPaint] Detected external clear ? resetting strokes.\n");
+                        printf("[GSPaint] Detected external clear - resetting strokes.\n");
                     }
                 }
             }
-
             beginDistributedUndoBlock("GS Paint Stroke", ANYLEVEL);
             myCurrentStrokeStart = myStrokePositions.size();
             myIsDrawing = true;
@@ -480,22 +470,21 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
 
         if (active && myIsDrawing)
         {
-            if (myCachedPoints.size() > 0)
+            SOP_GSPaintBrush* paintSop = dynamic_cast<SOP_GSPaintBrush*>(sop);
+            GEO_PointTreeGAOffset* tree = paintSop ? paintSop->getBaseKDTree() : nullptr;
+
+            OP_Context ctx(t);
+            const GU_Detail* canvasGdp = getCanvasGeo(sop, ctx);
+
+            if (tree && canvasGdp && myCachedPoints.size() > 0)
             {
                 UT_Vector3F ro(rayorig), rd(dir);
                 rd.normalize();
 
-                // ----- [START] kd tree data structure. -----
-                // Offset for best point near kd tree.
                 float bestT = 1e10f;
                 GA_Offset bestOffset = GA_INVALID_OFFSET;
 
-                // Candidate array.
-                GA_OffsetArray candidates;
-
-                // sample along ray.
-                float sceneFar = 200.0f; // Default sceneFar.
-                if (myCachedPoints.size() > 0)
+                float sceneFar = 200.0f;
                 {
                     float maxDist = 0.0f;
                     for (int i = 0; i < myCachedPoints.size(); i++)
@@ -505,34 +494,25 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                     }
                     sceneFar = maxDist + myBrushRadius;
                 }
-
                 float stepSize = SYSmax(myBrushRadius, sceneFar / 500.0f);
 
+                GA_OffsetArray candidates;
                 for (float tSample = 0.0f; tSample < sceneFar; tSample += stepSize)
                 {
                     candidates.clear();
-
                     UT_Vector3 samplePos = ro + rd * tSample;
-
-                    // Find closest candidates to sample position in brushRadius.
-                    myPointTree->findAllCloseIdx(samplePos, myBrushRadius, candidates);
+                    tree->findAllCloseIdx(samplePos, myBrushRadius, candidates);
 
                     for (exint i = 0; i < candidates.size(); i++)
                     {
                         GA_Offset off = candidates(i);
-
-                        UT_Vector3F p = myCanvasGdp->getPos3(off);
-
+                        UT_Vector3F p = canvasGdp->getPos3(off);
                         UT_Vector3F op = p - ro;
                         float t_val = op.dot(rd);
-
                         if (t_val < 0) continue;
-
                         UT_Vector3F closest = ro + rd * t_val;
                         float dist = (p - closest).length();
-
                         if (dist > myBrushRadius) continue;
-
                         if (t_val < bestT)
                         {
                             bestT = t_val;
@@ -541,25 +521,17 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                     }
                 }
 
-                // Use bestOffset to get hit position.
                 if (bestOffset != GA_INVALID_OFFSET)
                 {
-                    UT_Vector3F hitPos = myCanvasGdp->getPos3(bestOffset);
                     UT_Vector3F hitNorm(0, 1, 0);
-
-                    // Recreate reference to normal attribute so we can use that to calc hitNorm.
-                    GA_ROHandleV3 nHandle(myCanvasGdp->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
-
+                    GA_ROHandleV3 nHandle(canvasGdp->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
                     if (nHandle.isValid())
-                    {
                         hitNorm = UT_Vector3F(nHandle.get(bestOffset));
-                    }
-
-                    myRayHitPos = ro + rd * bestT;
-                    myRayDir = rd;
-                    myHasCurrentHit = true;                  
 
                     UT_Vector3F rayHitPos = ro + rd * bestT;
+                    myRayHitPos = rayHitPos;
+                    myRayDir = rd;
+                    myHasCurrentHit = true;
 
                     bool tooClose = false;
                     if (myStrokePositions.size() > (exint)myCurrentStrokeStart)
@@ -568,7 +540,7 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                             tooClose = true;
                     }
 
-                    GA_ROHandleV4 orientHandle(myCanvasGdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
+                    GA_ROHandleV4 orientHandle(canvasGdp->findFloatTuple(GA_ATTRIB_POINT, "orient", 4));
                     UT_Vector4F hitBaseOrient(0.f, 0.f, 0.f, 1.f);
                     if (orientHandle.isValid())
                         hitBaseOrient = UT_Vector4F(orientHandle.get(bestOffset));
@@ -581,66 +553,7 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                         myStrokeRayDirs.append(rd);
                         myStrokeRayHitPositions.append(rayHitPos);
                     }
-
                 }
-
-                // ----- [END] kd tree data structure. -----
-
-                // ----- [START] O(n) linear search. -----
-                // find nearest Gaussian point to ray
-                //float bestDist = 1e10f;
-                //float bestT = 1e10f;  // depth along ray
-                //int   bestIdx = -1;
-
-                //for (int i = 0; i < myCachedPoints.size(); i++)
-                //{
-                //    const UT_Vector3F& p = myCachedPoints[i];
-                //    UT_Vector3F op = p - ro;
-                //    float t_val = op.dot(rd);
-                //    if (t_val < 0) continue;  // behind camera
-
-                //    UT_Vector3F closest = ro + rd * t_val;
-                //    float dist = (p - closest).length();
-
-                //    if (dist > myBrushRadius) continue;  // outside brush radius
-
-                //    // among points within brush radius, prefer the closest to camera
-                //    if (t_val < bestT)
-                //    {
-                //        bestT = t_val;
-                //        bestDist = dist;
-                //        bestIdx = i;
-                //    }
-                //}
-
-                //if (bestIdx >= 0)
-                //{
-                //    myCurrentHitPos = myCachedPoints[bestIdx];
-                //    myHasCurrentHit = true;
-
-                //    UT_Vector3F hitPos = myCachedPoints[bestIdx];
-                //    UT_Vector3F hitNorm = myCachedNormals[bestIdx];
-                //    if (hitNorm.length() < 1e-6f) hitNorm = UT_Vector3F(0, 1, 0);
-
-                //    bool tooClose = false;
-                //    if (myStrokePositions.size() > (exint)myCurrentStrokeStart)
-                //    {
-                //        UT_Vector3F last = myStrokePositions.last();
-                //        if ((hitPos - last).length() < myBrushRadius * 0.01f)
-                //            tooClose = true;
-                //    }
-
-                //    if (!tooClose)
-                //    {
-                //        myStrokePositions.append(hitPos);
-                //        myStrokeNormals.append(hitNorm);
-                //    }
-                //}
-                //else
-                //{
-                //    myHasCurrentHit = false;
-                //}
-                // ----- [END] O(n) linear search. -----
             }
 
             flushToStrokeNode(t, "active");
@@ -648,11 +561,9 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
 
         if (end && myIsDrawing)
         {
-            // record stroke length
             int strokeLen = myStrokePositions.size() - myCurrentStrokeStart;
             if (strokeLen > 0)
                 myStrokeLengths.append(strokeLen);
-
             myIsDrawing = false;
             flushToStrokeNode(t, "end");
             endDistributedUndoBlock();
