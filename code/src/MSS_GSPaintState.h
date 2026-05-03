@@ -78,6 +78,13 @@ namespace HDK_Sample {
         UT_Array<UT_Vector3F> myCachedNormals;
         UT_Array<UT_Vector3F> myStampCenters; // stamp centers from SOP output, for hover hit
 
+        // Cached geom for hover logic.
+        // Only recalc when dirty.
+        UT_Vector3F myLastHighlightPos;
+        bool myHighlightDirty = true;
+        GU_Detail myCachedHighlightGeo;
+		GU_Detail myCachedStampHighlightGeo;
+
         void        flushToStrokeNode(fpreal t, const char* event);
         void        buildRayIntersect();
 

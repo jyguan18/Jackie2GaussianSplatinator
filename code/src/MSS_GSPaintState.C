@@ -327,6 +327,7 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
         myBrushRadius *= powf(1.01f, dist);
         myBrushRadius = SYSmax(myBrushRadius, 0.01f);
         sop->setFloat("brush_radius", 0, t, myBrushRadius);
+        myHighlightDirty = true;
         if (event->reason == UI_VALUE_CHANGED)
             myResizingCursor = false;
         updateBrush(myResizeCursorX, myResizeCursorY);
@@ -343,51 +344,21 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
         float bestT = 1e10f;
         bool hitFound = false;
 
-        // Get tree and canvas geo once, before the sample loop.
-        SOP_GSPaintBrush* paintSop = dynamic_cast<SOP_GSPaintBrush*>(sop);
-        GEO_PointTreeGAOffset* tree = paintSop ? paintSop->getBaseKDTree() : nullptr;
-
-        OP_Context ctx(t);
-        const GU_Detail* canvasGdp = getCanvasGeo(sop, ctx);
-
-        if (tree && canvasGdp)
+        // Iterate through the cached points for hover logic.
+        // Only runs once, so hopefully speed up hover for real time?
+        // No rebuilding or recalc of points.
+        for (int i = 0; i < myCachedPoints.size(); i++)
         {
-            float sceneFar = 200.0f;
-            if (myCachedPoints.size() > 0)
+            const UT_Vector3F& p = myCachedPoints[i];
+            UT_Vector3F op = p - ro;
+            float t_val = op.dot(rd);
+            if (t_val < 0) continue;
+            UT_Vector3F closest = ro + rd * t_val;
+            float dist = (p - closest).length();
+            if (dist <= myBrushRadius && t_val < bestT)
             {
-                float maxDist = 0.0f;
-                for (int i = 0; i < myCachedPoints.size(); i++)
-                {
-                    float d = (myCachedPoints[i] - ro).length();
-                    if (d > maxDist) maxDist = d;
-                }
-                sceneFar = maxDist + myBrushRadius;
-            }
-            float stepSize = SYSmax(myBrushRadius, sceneFar / 500.0f);
-
-            GA_OffsetArray hits;
-            for (float tSample = 0.0f; tSample < sceneFar; tSample += stepSize)
-            {
-                hits.clear();
-                UT_Vector3 samplePos = ro + rd * tSample;
-                tree->findAllCloseIdx(samplePos, myBrushRadius, hits);
-
-                for (exint i = 0; i < hits.size(); i++)
-                {
-                    GA_Offset off = hits(i);
-                    UT_Vector3F p = canvasGdp->getPos3(off);
-                    UT_Vector3F op = p - ro;
-                    float t_val = op.dot(rd);
-                    if (t_val < 0) continue;
-                    UT_Vector3F closest = ro + rd * t_val;
-                    float dist = (p - closest).length();
-                    if (dist > myBrushRadius) continue;
-                    if (t_val < bestT)
-                    {
-                        bestT = t_val;
-                        hitFound = true;
-                    }
-                }
+                bestT = t_val;
+                hitFound = true;
             }
         }
 
@@ -689,181 +660,168 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
     // draw affected Gaussians highlight (base scene points + stamped Gaussians)
     if (!isPreempted() && myIsBrushVisible && myHasCurrentHit)
     {
-        GU_Detail highlightGeo;
-        GU_Detail stampHighlightGeo;
-        float radius2 = myBrushRadius * myBrushRadius;
-
-        UT_Color highlightClr;
-        UT_Color stampClr;
-        int op = sop ? sop->evalInt("operation", 0, getTime()) : 0;
-        if (isPaintMode)
+        // Only rebuild highlight geometry when cursor has moved significantly.
+        if (myHighlightDirty)
         {
+            myCachedHighlightGeo.clearAndDestroy();
+            myCachedStampHighlightGeo.clearAndDestroy();
+            float radius2 = myBrushRadius * myBrushRadius;
+
+            int op = sop ? sop->evalInt("operation", 0, getTime()) : 0;
+            bool useTrail = myIsDrawing && (op == 1 || op == 2) && myStrokePositions.size() > (exint)myCurrentStrokeStart;
+
+            // Rebuild screen-space projection values
+            UT_DimRect vp = r->getViewport2DI();
+            int vpw = vp.width();
+            int vph = vp.height();
+
+            auto worldToScreen = [&](const UT_Vector3F& worldPt, float& sx, float& sy) -> bool
+                {
+                    UT_Matrix4 view, proj;
+                    getViewportTransform(view);
+                    getViewportProjectionTransform(proj);
+                    UT_Vector4 p(worldPt.x(), worldPt.y(), worldPt.z(), 1.0f);
+                    p = p * view * proj;
+                    if (p.w() <= 0.f) return false;
+                    sx = (p.x() / p.w() + 1.f) * 0.5f * vpw;
+                    sy = (p.y() / p.w() + 1.f) * 0.5f * vph;
+                    return true;
+                };
+
+            float cx, cy;
+            worldToScreen(myCursorWorldPos, cx, cy);
+            UT_Vector3F offsetPt = myCursorWorldPos + myCursorRight * myBrushRadius;
+            float ex, ey;
+            worldToScreen(offsetPt, ex, ey);
+            float screenRadius2 = (ex - cx) * (ex - cx) + (ey - cy) * (ey - cy);
+
+            auto inScreenRadius = [&](const UT_Vector3F& p) -> bool
+                {
+                    float px, py;
+                    if (!worldToScreen(p, px, py)) return false;
+                    float dx = px - cx, dy = py - cy;
+                    return (dx * dx + dy * dy) <= screenRadius2;
+                };
+
+            // Highlight base-scene cached points
+            if (myCachedPoints.size() > 0)
+            {
+                for (int i = 0; i < myCachedPoints.size(); i++)
+                {
+                    const UT_Vector3F& p = myCachedPoints[i];
+                    bool inRange = false;
+                    if (useTrail)
+                    {
+                        for (exint s = myCurrentStrokeStart; s < myStrokePositions.size(); s++)
+                        {
+                            UT_Vector3F savedDir = myStrokeRayDirs[s];
+                            auto dist2 = [&](const UT_Vector3F& pt, const UT_Vector3F& center) {
+                                UT_Vector3F diff = pt - center;
+                                float along = diff.dot(savedDir);
+                                UT_Vector3F perp = diff - savedDir * along;
+                                return perp.length2();
+                                };
+                            if (dist2(p, myStrokeRayHitPositions[s]) <= radius2)
+                            {
+                                inRange = true; break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        inRange = inScreenRadius(p);
+                    }
+                    if (!inRange) continue;
+                    GA_Offset pt = myCachedHighlightGeo.appendPoint();
+                    myCachedHighlightGeo.setPos3(pt, UT_Vector3(p));
+                }
+            }
+
+            // Highlight stamped Gaussians
+            if (sop)
+            {
+                OP_Context ctx(getTime());
+                const GU_Detail* outputGdp = sop->getCookedGeo(ctx);
+                if (outputGdp)
+                {
+                    OP_Node* baseInput = sop->getInput(2);
+                    int baseCount = 0;
+                    if (baseInput)
+                    {
+                        SOP_Node* baseSop = dynamic_cast<SOP_Node*>(baseInput);
+                        if (baseSop)
+                        {
+                            const GU_Detail* baseGeo = baseSop->getCookedGeo(ctx);
+                            if (baseGeo) baseCount = (int)baseGeo->getNumPoints();
+                        }
+                    }
+
+                    GA_ROHandleV3 scHandle(outputGdp->findFloatTuple(GA_ATTRIB_POINT, "stampCenter", 3));
+                    bool eraseMode = (op == 2);
+                    int outIdx = 0;
+                    GA_Offset ptoff;
+                    GA_FOR_ALL_PTOFF(outputGdp, ptoff)
+                    {
+                        if (outIdx >= baseCount)
+                        {
+                            UT_Vector3F p(outputGdp->getPos3(ptoff));
+                            UT_Vector3F testPos = (eraseMode || !scHandle.isValid())
+                                ? p : UT_Vector3F(scHandle.get(ptoff));
+                            bool inRange = false;
+                            if (useTrail)
+                            {
+                                for (exint s = myCurrentStrokeStart; s < myStrokePositions.size(); s++)
+                                {
+                                    UT_Vector3F savedDir = myStrokeRayDirs[s];
+                                    auto dist2 = [&](const UT_Vector3F& pt, const UT_Vector3F& center) {
+                                        UT_Vector3F diff = pt - center;
+                                        float along = diff.dot(savedDir);
+                                        UT_Vector3F perp = diff - savedDir * along;
+                                        return perp.length2();
+                                        };
+                                    if (dist2(testPos, myStrokeRayHitPositions[s]) <= radius2)
+                                    {
+                                        inRange = true; break;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                inRange = inScreenRadius(p);
+                            }
+                            if (inRange)
+                            {
+                                GA_Offset hpt = myCachedStampHighlightGeo.appendPoint();
+                                myCachedStampHighlightGeo.setPos3(hpt, UT_Vector3(p));
+                            }
+                        }
+                        outIdx++;
+                    }
+                }
+            }
+
+            myHighlightDirty = false;
+        }
+
+        UT_Color highlightClr, stampClr;
+        int op = sop ? sop->evalInt("operation", 0, getTime()) : 0;
+        if (isPaintMode) {
             highlightClr = UT_Color(UT_RGB, 0.0, 0.5, 1.0);
             stampClr = UT_Color(UT_RGB, 0.0, 0.8, 1.0);
         }
-        else if (op == 2) // erase
-        {
+        else if (op == 2) {
             highlightClr = UT_Color(UT_RGB, 1.0, 0.1, 0.1);
             stampClr = UT_Color(UT_RGB, 1.0, 0.4, 0.1);
         }
-        else // stamp
-        {
+        else {
             highlightClr = UT_Color(UT_RGB, 1.0, 0.8, 0.0);
             stampClr = UT_Color(UT_RGB, 0.6, 1.0, 0.2);
         }
 
-        bool useTrail = myIsDrawing && (op == 1 || op == 2) && myStrokePositions.size() > (exint)myCurrentStrokeStart;
-
-        /*auto screenPlaneDist2 = [&](const UT_Vector3F& p, const UT_Vector3F& center) -> float
-            {
-                UT_Vector3F diff = p - center;
-                float along = diff.dot(myRayDir);
-                UT_Vector3F perp = diff - myRayDir * along;
-                return perp.length2();
-            };*/
-
-        UT_DimRect vp = r->getViewport2DI();
-        int vpw = vp.width();
-        int vph = vp.height();
-
-        auto worldToScreen = [&](const UT_Vector3F& worldPt, float& sx, float& sy) -> bool
-            {
-                UT_Matrix4 view, proj;
-                getViewportTransform(view);
-                getViewportProjectionTransform(proj);
-                UT_Vector4 p(worldPt.x(), worldPt.y(), worldPt.z(), 1.0f);
-                p = p * view * proj;
-                if (p.w() <= 0.f) return false;
-                // NDC to actual pixels
-                sx = (p.x() / p.w() + 1.f) * 0.5f * vpw;
-                sy = (p.y() / p.w() + 1.f) * 0.5f * vph;
-                return true;
-            };
-
-        // Project cursor center
-        float cx, cy;
-        worldToScreen(myCursorWorldPos, cx, cy);
-
-        // Project a point offset by myBrushRadius to get screen-space radius
-        // Use whichever axis is most perpendicular to rd
-        UT_Vector3F offsetPt = myCursorWorldPos + myCursorRight * myBrushRadius;
-        float ex, ey;
-        worldToScreen(offsetPt, ex, ey);
-        float screenRadius2 = (ex - cx) * (ex - cx) + (ey - cy) * (ey - cy);
-
-        auto inScreenRadius = [&](const UT_Vector3F& p) -> bool
-            {
-                float px, py;
-                if (!worldToScreen(p, px, py)) return false;
-                float dx = px - cx, dy = py - cy;
-                return (dx * dx + dy * dy) <= screenRadius2;
-            };
-
-        // highlight base-scene cached points
-        if (myCachedPoints.size() > 0)
-        {
-            for (int i = 0; i < myCachedPoints.size(); i++)
-            {
-                const UT_Vector3F& p = myCachedPoints[i];
-                bool inRange = false;
-                if (useTrail)
-                {
-                    for (exint s = myCurrentStrokeStart;
-                        s < myStrokePositions.size(); s++)
-                    {
-                        UT_Vector3F savedDir = myStrokeRayDirs[s];
-                        auto dist2 = [&](const UT_Vector3F& pt, const UT_Vector3F& center) {
-                            UT_Vector3F diff = pt - center;
-                            float along = diff.dot(savedDir);
-                            UT_Vector3F perp = diff - savedDir * along;
-                            return perp.length2();
-                            };
-                        if (dist2(p, myStrokeRayHitPositions[s]) <= radius2)
-                        {
-                            inRange = true; break;
-                        }
-                    }
-                }
-                else
-                {
-                    inRange = inScreenRadius(p);
-                }
-                if (!inRange) continue;
-                GA_Offset pt = highlightGeo.appendPoint();
-                highlightGeo.setPos3(pt, UT_Vector3(p));
-            }
-        }
-
-        // highlight stamped Gaussians from the SOP's cooked output geometry
-        if (sop)
-        {
-            OP_Context ctx(getTime());
-            const GU_Detail* outputGdp = sop->getCookedGeo(ctx);
-            if (outputGdp)
-            {
-                OP_Node* baseInput = sop->getInput(2);
-                int baseCount = 0;
-                if (baseInput)
-                {
-                    SOP_Node* baseSop = dynamic_cast<SOP_Node*>(baseInput);
-                    if (baseSop)
-                    {
-                        const GU_Detail* baseGeo = baseSop->getCookedGeo(ctx);
-                        if (baseGeo) baseCount = (int)baseGeo->getNumPoints();
-                    }
-                }
-
-                GA_ROHandleV3 scHandle(outputGdp->findFloatTuple(
-                    GA_ATTRIB_POINT, "stampCenter", 3));
-                bool eraseMode = (op == 2);
-                int outIdx = 0;
-                GA_Offset ptoff;
-                GA_FOR_ALL_PTOFF(outputGdp, ptoff)
-                {
-                    if (outIdx >= baseCount)
-                    {
-                        UT_Vector3F p(outputGdp->getPos3(ptoff));
-                        UT_Vector3F testPos = (eraseMode || !scHandle.isValid())
-                            ? p : UT_Vector3F(scHandle.get(ptoff));
-                        bool inRange = false;
-                        if (useTrail)
-                        {
-                            for (exint s = myCurrentStrokeStart;
-                                s < myStrokePositions.size(); s++)
-                            {
-                                UT_Vector3F savedDir = myStrokeRayDirs[s];
-                                auto dist2 = [&](const UT_Vector3F& pt, const UT_Vector3F& center) {
-                                    UT_Vector3F diff = pt - center;
-                                    float along = diff.dot(savedDir);
-                                    UT_Vector3F perp = diff - savedDir * along;
-                                    return perp.length2();
-                                    };
-                                if (dist2(testPos, myStrokeRayHitPositions[s]) <= radius2)
-                                {
-                                    inRange = true; break;
-                                }
-                            }
-                        }
-                        else
-                        {
-                            inRange = inScreenRadius(p);
-                        }
-                        if (inRange)
-                        {
-                            GA_Offset hpt = stampHighlightGeo.appendPoint();
-                            stampHighlightGeo.setPos3(hpt, UT_Vector3(p));
-                        }
-                    }
-                    outIdx++;
-                }
-            }
-        }
-
-        if (highlightGeo.getNumPoints() > 0)
-            myBrushHandle.renderWire(r, 0, 0, 0, highlightClr, &highlightGeo);
-
-        if (stampHighlightGeo.getNumPoints() > 0)
-            myBrushHandle.renderWire(r, 0, 0, 0, stampClr, &stampHighlightGeo);
+        if (myCachedHighlightGeo.getNumPoints() > 0)
+            myBrushHandle.renderWire(r, 0, 0, 0, highlightClr, &myCachedHighlightGeo);
+        if (myCachedStampHighlightGeo.getNumPoints() > 0)
+            myBrushHandle.renderWire(r, 0, 0, 0, stampClr, &myCachedStampHighlightGeo);
     }
 }
 
@@ -893,6 +851,13 @@ MSS_GSPaintState::updateBrush(int x, int y)
     }
     UT_Vector3F cursorPos = ro + rd * targetDepth;
     myCursorWorldPos = cursorPos;
+
+    // Check if highlight is dirty. Iff dirty, update.
+    if ((cursorPos - myLastHighlightPos).length() > myBrushRadius * 0.05f)
+    {
+        myHighlightDirty = true;
+        myLastHighlightPos = cursorPos;
+    }
 
     UT_Vector3F camForward = -rd;
     UT_Vector3F up(0, 1, 0);
