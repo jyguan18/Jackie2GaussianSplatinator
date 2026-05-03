@@ -80,7 +80,8 @@ namespace HDK_Sample {
 
         // Cached geom for hover logic.
         // Only recalc when dirty.
-        UT_Vector3F myLastHighlightPos;
+        int myLastHighlightX = -9999;
+        int myLastHighlightY = -9999;
         bool myHighlightDirty = true;
         GU_Detail myCachedHighlightGeo;
 		GU_Detail myCachedStampHighlightGeo;

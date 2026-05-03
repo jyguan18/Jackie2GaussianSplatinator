@@ -853,10 +853,11 @@ MSS_GSPaintState::updateBrush(int x, int y)
     myCursorWorldPos = cursorPos;
 
     // Check if highlight is dirty. Iff dirty, update.
-    if ((cursorPos - myLastHighlightPos).length() > myBrushRadius * 0.05f)
+    if (abs(x - myLastHighlightX) > 2 || abs(y - myLastHighlightY) > 2)
     {
         myHighlightDirty = true;
-        myLastHighlightPos = cursorPos;
+        myLastHighlightX = x;
+        myLastHighlightY = y;
     }
 
     UT_Vector3F camForward = -rd;
