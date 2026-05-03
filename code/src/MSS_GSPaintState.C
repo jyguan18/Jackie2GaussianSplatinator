@@ -135,8 +135,7 @@ MSS_GSPaintState::handleOpNodeChange(OP_Node& node)
     redrawScene();
 }
 
-void
-MSS_GSPaintState::buildRayIntersect()
+void MSS_GSPaintState::buildRayIntersect()
 {
     myCachedPoints.clear();
     myCachedNormals.clear();
@@ -146,16 +145,20 @@ MSS_GSPaintState::buildRayIntersect()
     if (!sop) return;
 
     OP_Context context(getTime());
-    const GU_Detail* geo = getCanvasGeo(sop, context);
-    if (!geo) return;
 
-    myCanvasGdp = geo;
+    // myCanvasGdp points to input 2 — stable during strokes
+    myCanvasGdp = getCanvasGeo(sop, context);
+    if (!myCanvasGdp) return;
 
-    GA_ROHandleV3 nHandle(geo->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
+    // myCachedPoints built from SOP output — excludes erased points
+    const GU_Detail* outputGeo = sop->getCookedGeo(context);
+    const GU_Detail* pointSource = outputGeo ? outputGeo : myCanvasGdp;
+
+    GA_ROHandleV3 nHandle(pointSource->findFloatTuple(GA_ATTRIB_POINT, "N", 3));
     GA_Offset ptoff;
-    GA_FOR_ALL_PTOFF(geo, ptoff)
+    GA_FOR_ALL_PTOFF(pointSource, ptoff)
     {
-        myCachedPoints.append(UT_Vector3F(geo->getPos3(ptoff)));
+        myCachedPoints.append(UT_Vector3F(pointSource->getPos3(ptoff)));
         if (nHandle.isValid())
             myCachedNormals.append(UT_Vector3F(nHandle.get(ptoff)));
         else
