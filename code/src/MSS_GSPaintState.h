@@ -73,7 +73,7 @@ namespace HDK_Sample {
         UT_Array<UT_Vector3F> myStrokeRayHitPositions;
         UT_Array<UT_Vector3F> myStrokeRayDirs;
 
-        const GU_Detail* myCanvasGdp;
+        const GU_Detail* myCanvasGdp = nullptr;
         UT_Array<UT_Vector3F> myCachedPoints;
         UT_Array<UT_Vector3F> myCachedNormals;
         UT_Array<UT_Vector3F> myStampCenters; // stamp centers from SOP output, for hover hit
