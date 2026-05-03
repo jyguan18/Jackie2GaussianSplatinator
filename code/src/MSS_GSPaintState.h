@@ -52,6 +52,8 @@ namespace HDK_Sample {
         UT_Vector3F myRayHitPos;
         UT_Vector3F myRayDir;
         bool        myHasCurrentHit;
+        UT_Vector3F myCursorWorldPos;
+        UT_Vector3F myCursorRight;
 
 
         // stroke points accumulated during drag

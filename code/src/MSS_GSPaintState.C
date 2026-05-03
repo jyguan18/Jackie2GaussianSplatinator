@@ -803,12 +803,49 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
 
         bool useTrail = myIsDrawing && (op == 1 || op == 2) && myStrokePositions.size() > (exint)myCurrentStrokeStart;
 
-        auto screenPlaneDist2 = [&](const UT_Vector3F& p, const UT_Vector3F& center) -> float
+        /*auto screenPlaneDist2 = [&](const UT_Vector3F& p, const UT_Vector3F& center) -> float
             {
                 UT_Vector3F diff = p - center;
                 float along = diff.dot(myRayDir);
                 UT_Vector3F perp = diff - myRayDir * along;
                 return perp.length2();
+            };*/
+
+        UT_DimRect vp = r->getViewport2DI();
+        int vpw = vp.width();
+        int vph = vp.height();
+
+        auto worldToScreen = [&](const UT_Vector3F& worldPt, float& sx, float& sy) -> bool
+            {
+                UT_Matrix4 view, proj;
+                getViewportTransform(view);
+                getViewportProjectionTransform(proj);
+                UT_Vector4 p(worldPt.x(), worldPt.y(), worldPt.z(), 1.0f);
+                p = p * view * proj;
+                if (p.w() <= 0.f) return false;
+                // NDC to actual pixels
+                sx = (p.x() / p.w() + 1.f) * 0.5f * vpw;
+                sy = (p.y() / p.w() + 1.f) * 0.5f * vph;
+                return true;
+            };
+
+        // Project cursor center
+        float cx, cy;
+        worldToScreen(myCursorWorldPos, cx, cy);
+
+        // Project a point offset by myBrushRadius to get screen-space radius
+        // Use whichever axis is most perpendicular to rd
+        UT_Vector3F offsetPt = myCursorWorldPos + myCursorRight * myBrushRadius;
+        float ex, ey;
+        worldToScreen(offsetPt, ex, ey);
+        float screenRadius2 = (ex - cx) * (ex - cx) + (ey - cy) * (ey - cy);
+
+        auto inScreenRadius = [&](const UT_Vector3F& p) -> bool
+            {
+                float px, py;
+                if (!worldToScreen(p, px, py)) return false;
+                float dx = px - cx, dy = py - cy;
+                return (dx * dx + dy * dy) <= screenRadius2;
             };
 
         // highlight base-scene cached points
@@ -838,7 +875,7 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
                 }
                 else
                 {
-                    inRange = screenPlaneDist2(p, myRayHitPos) <= radius2;
+                    inRange = inScreenRadius(p);
                 }
                 if (!inRange) continue;
                 GA_Offset pt = highlightGeo.appendPoint();
@@ -898,7 +935,7 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
                         }
                         else
                         {
-                            inRange = screenPlaneDist2(testPos, myRayHitPos) <= radius2;
+                            inRange = inScreenRadius(p);
                         }
                         if (inRange)
                         {
@@ -928,23 +965,48 @@ MSS_GSPaintState::updatePrompt()
 void
 MSS_GSPaintState::updateBrush(int x, int y)
 {
-    getViewportItransform(myBrushCursorXform);
+    UT_Vector3 rayorig, dir;
+    mapToWorld(x, y, dir, rayorig);
+    UT_Vector3F ro(rayorig), rd(dir);
+    rd.normalize();
+    myRayDir = rd;
 
-    if (myHasCurrentHit)
+    // Always place cursor at average scene depth — never snap to hit point
+    float targetDepth = 10.0f;
+    if (myCachedPoints.size() > 0)
     {
-        UT_Vector3 forward = rowVecMult3(UT_Vector3(0, 0, -1), myBrushCursorXform);
-        myBrushCursorXform.setTranslates(myRayHitPos);
-        myBrushCursorXform.prescale(myBrushRadius, myBrushRadius, 1);
+        float totalDist = 0.f;
+        for (int i = 0; i < myCachedPoints.size(); i++)
+            totalDist += (myCachedPoints[i] - ro).dot(rd);
+        targetDepth = SYSmax(totalDist / myCachedPoints.size(), 1.0f);
     }
-    else
-    {
-        UT_Vector3 forward = rowVecMult3(UT_Vector3(0, 0, -1), myBrushCursorXform);
-        UT_Vector3 rayorig, dir;
-        mapToWorld(x, y, dir, rayorig);
-        UT_Vector3 delta(1.0 / dot(dir, forward) * dir);
-        myBrushCursorXform.translate(delta.x(), delta.y(), delta.z());
-        myBrushCursorXform.prescale(myBrushRadius, myBrushRadius, 1);
-    }
+    UT_Vector3F cursorPos = ro + rd * targetDepth;
+    myCursorWorldPos = cursorPos;
+
+    UT_Vector3F camForward = -rd;
+    UT_Vector3F up(0, 1, 0);
+    if (SYSabs(camForward.dot(up)) > 0.99f)
+        up = UT_Vector3F(1, 0, 0);
+    UT_Vector3F right = cross(up, camForward);
+    right.normalize();
+    up = cross(camForward, right);
+    up.normalize();
+
+    myCursorRight = right;
+
+    myBrushCursorXform.identity();
+    myBrushCursorXform(0, 0) = right.x() * myBrushRadius;
+    myBrushCursorXform(0, 1) = right.y() * myBrushRadius;
+    myBrushCursorXform(0, 2) = right.z() * myBrushRadius;
+    myBrushCursorXform(1, 0) = up.x() * myBrushRadius;
+    myBrushCursorXform(1, 1) = up.y() * myBrushRadius;
+    myBrushCursorXform(1, 2) = up.z() * myBrushRadius;
+    myBrushCursorXform(2, 0) = camForward.x();
+    myBrushCursorXform(2, 1) = camForward.y();
+    myBrushCursorXform(2, 2) = camForward.z();
+    myBrushCursorXform(3, 0) = cursorPos.x();
+    myBrushCursorXform(3, 1) = cursorPos.y();
+    myBrushCursorXform(3, 2) = cursorPos.z();
 
     myIsBrushVisible = true;
     redrawScene();

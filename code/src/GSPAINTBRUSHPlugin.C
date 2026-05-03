@@ -643,15 +643,20 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
             for (auto& kv : myStampedGaussians)
             {
                 GaussianAttribs& a = kv.second;
-                float minDist2 = 1e10f;
-                for (const UT_Vector3F& sp : newStrokePositions)
+                float minPerp2 = 1e10f;
+                for (exint si = 0; si < newStrokePositions.size(); si++)
                 {
-                    float d2 = (a.pos - sp).length2();
-                    if (d2 < minDist2) minDist2 = d2;
+                    const UT_Vector3F& sp = newStrokePositions[si];
+                    const UT_Vector3F& rd = newStrokeRayDirs[si];
+                    UT_Vector3F diff = a.pos - sp;
+                    float along = diff.dot(rd);
+                    UT_Vector3F perp = diff - rd * along;
+                    float d2 = perp.length2();
+                    if (d2 < minPerp2) minPerp2 = d2;
                 }
-                if (minDist2 > radius2) continue;
+                if (minPerp2 > radius2) continue;
 
-                float dist = SYSsqrt(minDist2);
+                float dist = SYSsqrt(minPerp2);
                 float falloff = 1.0f - (dist / brushRadius);
                 float blend = paintAlpha * falloff;
                 float inv = 1.0f - blend;
@@ -734,9 +739,14 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
             {
                 GA_Offset ptoff = baseGdp->pointOffset(kv.first);
                 UT_Vector3F pos = UT_Vector3F(baseGdp->getPos3(ptoff));
-                for (const UT_Vector3F& sp : newStrokePositions)
+                for (exint si = 0; si < newStrokePositions.size(); si++)
                 {
-                    if ((pos - sp).length2() <= radius2)
+                    const UT_Vector3F& sp = newStrokePositions[si];
+                    const UT_Vector3F& rd = newStrokeRayDirs[si];
+                    UT_Vector3F diff = pos - sp;
+                    float along = diff.dot(rd);
+                    UT_Vector3F perp = diff - rd * along;
+                    if (perp.length2() <= radius2)
                     {
                         toRemove.append(kv.first); break;
                     }
