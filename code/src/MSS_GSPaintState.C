@@ -346,6 +346,7 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
 
         float bestT = 1e10f;
         bool hitFound = false;
+        int bestIdx = -1;
 
         // Iterate through the cached points for hover logic.
         // Only runs once, so hopefully speed up hover for real time?
@@ -362,6 +363,7 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
             {
                 bestT = t_val;
                 hitFound = true;
+                bestIdx = i;
             }
         }
 
@@ -501,7 +503,16 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                     if (nHandle.isValid())
                         hitNorm = UT_Vector3F(nHandle.get(bestOffset));
 
+                    int operation = sop->evalInt("operation", 0, t);
                     UT_Vector3F rayHitPos = ro + rd * bestT;
+                    UT_Vector3F snappedRayHitPos = rayHitPos;
+
+                    if (operation == 0)
+                    {
+                        UT_Vector3F actualPoint = UT_Vector3F(myCanvasGdp->getPos3(bestOffset));
+                        snappedRayHitPos.y() = actualPoint.y();
+                    }
+
                     myRayHitPos = rayHitPos;
                     myRayDir = rd;
                     myHasCurrentHit = true;
@@ -509,7 +520,7 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                     bool tooClose = false;
                     if (myStrokePositions.size() > (exint)myCurrentStrokeStart)
                     {
-                        if ((rayHitPos - myStrokePositions.last()).length() < myBrushRadius * 0.01f)
+                        if ((snappedRayHitPos - myStrokePositions.last()).length() < myBrushRadius * 0.01f)
                             tooClose = true;
                     }
 
@@ -520,7 +531,7 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
 
                     if (!tooClose)
                     {
-                        myStrokePositions.append(rayHitPos);
+                        myStrokePositions.append(snappedRayHitPos);
                         myStrokeNormals.append(hitNorm);
                         myStrokeBaseOrients.append(hitBaseOrient);
                         myStrokeRayDirs.append(rd);
@@ -660,51 +671,51 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
         }
     }
 
+
     // draw affected Gaussians highlight (base scene points + stamped Gaussians)
     if (!isPreempted() && myIsBrushVisible && myHasCurrentHit)
     {
+        int op = sop ? sop->evalInt("operation", 0, getTime()) : 0;
+        bool useTrail = myIsDrawing && (op == 1 || op == 2) && myStrokePositions.size() > (exint)myCurrentStrokeStart;
+
+        UT_DimRect vp = r->getViewport2DI();
+        int vpw = vp.width();
+        int vph = vp.height();
+
+        auto worldToScreen = [&](const UT_Vector3F& worldPt, float& sx, float& sy) -> bool
+            {
+                UT_Matrix4 view, proj;
+                getViewportTransform(view);
+                getViewportProjectionTransform(proj);
+                UT_Vector4 p(worldPt.x(), worldPt.y(), worldPt.z(), 1.0f);
+                p = p * view * proj;
+                if (p.w() <= 0.f) return false;
+                sx = (p.x() / p.w() + 1.f) * 0.5f * vpw;
+                sy = (p.y() / p.w() + 1.f) * 0.5f * vph;
+                return true;
+            };
+
+        float cx, cy;
+        worldToScreen(myCursorWorldPos, cx, cy);
+        UT_Vector3F offsetPt = myCursorWorldPos + myCursorRight * myBrushRadius;
+        float ex, ey;
+        worldToScreen(offsetPt, ex, ey);
+        float screenRadius2 = (ex - cx) * (ex - cx) + (ey - cy) * (ey - cy);
+
+        auto inScreenRadius = [&](const UT_Vector3F& p) -> bool
+            {
+                float px, py;
+                if (!worldToScreen(p, px, py)) return false;
+                float dx = px - cx, dy = py - cy;
+                return (dx * dx + dy * dy) <= screenRadius2;
+            };
+
         // Only rebuild highlight geometry when cursor has moved significantly.
         if (myHighlightDirty)
         {
             myCachedHighlightGeo.clearAndDestroy();
             myCachedStampHighlightGeo.clearAndDestroy();
             float radius2 = myBrushRadius * myBrushRadius;
-
-            int op = sop ? sop->evalInt("operation", 0, getTime()) : 0;
-            bool useTrail = myIsDrawing && (op == 1 || op == 2) && myStrokePositions.size() > (exint)myCurrentStrokeStart;
-
-            // Rebuild screen-space projection values
-            UT_DimRect vp = r->getViewport2DI();
-            int vpw = vp.width();
-            int vph = vp.height();
-
-            auto worldToScreen = [&](const UT_Vector3F& worldPt, float& sx, float& sy) -> bool
-                {
-                    UT_Matrix4 view, proj;
-                    getViewportTransform(view);
-                    getViewportProjectionTransform(proj);
-                    UT_Vector4 p(worldPt.x(), worldPt.y(), worldPt.z(), 1.0f);
-                    p = p * view * proj;
-                    if (p.w() <= 0.f) return false;
-                    sx = (p.x() / p.w() + 1.f) * 0.5f * vpw;
-                    sy = (p.y() / p.w() + 1.f) * 0.5f * vph;
-                    return true;
-                };
-
-            float cx, cy;
-            worldToScreen(myCursorWorldPos, cx, cy);
-            UT_Vector3F offsetPt = myCursorWorldPos + myCursorRight * myBrushRadius;
-            float ex, ey;
-            worldToScreen(offsetPt, ex, ey);
-            float screenRadius2 = (ex - cx) * (ex - cx) + (ey - cy) * (ey - cy);
-
-            auto inScreenRadius = [&](const UT_Vector3F& p) -> bool
-                {
-                    float px, py;
-                    if (!worldToScreen(p, px, py)) return false;
-                    float dx = px - cx, dy = py - cy;
-                    return (dx * dx + dy * dy) <= screenRadius2;
-                };
 
             // Highlight base-scene cached points
             if (myCachedPoints.size() > 0)
@@ -771,7 +782,7 @@ MSS_GSPaintState::doRender(RE_Render* r, int, int, int ghost)
         }
 
         UT_Color highlightClr, stampClr;
-        int op = sop ? sop->evalInt("operation", 0, getTime()) : 0;
+
         if (isPaintMode) {
             highlightClr = UT_Color(UT_RGB, 0.0, 0.5, 1.0);
             stampClr = UT_Color(UT_RGB, 0.0, 0.8, 1.0);

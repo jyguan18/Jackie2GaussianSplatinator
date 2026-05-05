@@ -103,6 +103,9 @@ namespace HDK_Sample {
         // Stamp ID counter.
         int myNextStampId;
 
+        int myLastOperation = -1;
+        int myOperationSwitchStrokeSize = 0;
+
         // paint mode: per-point color overrides (keyed by point index in base scene)
         UT_Map<GA_Index, GaussianAttribs> myPaintedAttribs;
 

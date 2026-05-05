@@ -335,6 +335,18 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
     // ── get current stroke points ─────────────────────────────────────────
     const GU_Detail* targetGdp = inputGeo(1, context);
 
+
+    if (operation != myLastOperation)
+    {
+        myKnownPieces.clear();
+        myStrokeModeMap.clear();
+        myLastProcessedStrokeSize = 0;
+        myOperationSwitchStrokeSize = targetGdp ? targetGdp->getNumPoints() : 0;
+        myOperationSwitchStrokeSize = SYSmin(myOperationSwitchStrokeSize,
+            targetGdp ? (int)targetGdp->getNumPoints() : 0);
+        myLastOperation = operation;
+    }
+
     if (baseGdp && (!myBaseKDTree || parmChanged))
     {
         myBaseKDTree.reset(new GEO_PointTreeGAOffset());
@@ -369,11 +381,13 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
         {
             GA_FOR_ALL_PTOFF(targetGdp, ptoff)
             {
-                if (useAllStrokePoints || idx >= myLastProcessedStrokeSize)
+                // For all modes, skip pre-switch points for piece registration
+                // But for newStrokePositions, only collect truly new points
+                bool preSwitch = (idx < myOperationSwitchStrokeSize);
+
+                if (!preSwitch && (useAllStrokePoints || idx >= myLastProcessedStrokeSize))
                 {
-                    newStrokePositions.append(
-                        UT_Vector3F(targetGdp->getPos3(ptoff))
-                    );
+                    newStrokePositions.append(UT_Vector3F(targetGdp->getPos3(ptoff)));
 
                     UT_Vector3F rd(0, 0, -1);
                     if (tgt_rayDir_erase.isValid())
@@ -384,12 +398,15 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                     newStrokeRayDirs.append(rd);
                 }
 
-                int pieceId = pieceHandle.isValid() ? pieceHandle.get(ptoff) : 0;
-                if (!myKnownPieces.contains(pieceId))
+                if (!preSwitch)
                 {
-                    myKnownPieces.insert(pieceId);
-                    myStrokeModeMap[pieceId] = operation;
-                    newPiecesThisCook.insert(pieceId);
+                    int pieceId = pieceHandle.isValid() ? pieceHandle.get(ptoff) : 0;
+                    if (!myKnownPieces.contains(pieceId))
+                    {
+                        myKnownPieces.insert(pieceId);
+                        myStrokeModeMap[pieceId] = operation;
+                        newPiecesThisCook.insert(pieceId);
+                    }
                 }
                 idx++;
             }
@@ -428,6 +445,15 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 }
                 centroid /= (float)npts;
 
+                // anchor at bottom of bbox instead of centroid
+                UT_BoundingBox bbox;
+                splatsGdp->computeQuickBounds(bbox);
+                UT_Vector3F anchor(
+                    (bbox.minvec().x() + bbox.maxvec().x()) * 0.5f,
+                    bbox.minvec().y(),
+                    (bbox.minvec().z() + bbox.maxvec().z()) * 0.5f
+                );
+
                 // build brush pattern
                 UT_Array<SplatStamp> brushPattern;
                 {
@@ -435,7 +461,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                     GA_FOR_ALL_PTOFF(splatsGdp, ptoff)
                     {
                         SplatStamp s;
-                        s.localOffset = UT_Vector3F(splatsGdp->getPos3(ptoff)) - centroid;
+                        s.localOffset = UT_Vector3F(splatsGdp->getPos3(ptoff)) - anchor;
                         s.alpha = src_alpha.isValid()
                             ? SYSclamp(src_alpha.get(ptoff) * brushOpacity, 0.f, 1.f) : 1.f;
                         if (src_scale.isValid())
@@ -454,6 +480,18 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                             ? UT_Vector3F(src_cd.get(ptoff)) : UT_Vector3F(1, 1, 1);
                         brushPattern.append(s);
                     }
+
+                    // After building brushPattern, find the true minimum Y projection
+// in the unrotated (stamp-up = Y) frame, and subtract it out
+// so the bottom of the stamp is guaranteed to be at localOffset.y == 0.
+                    float minLocalY = 1e10f;
+                    for (const SplatStamp& s : brushPattern)
+                        if (s.localOffset.y() < minLocalY) minLocalY = s.localOffset.y();
+
+                    // Shift all offsets so the lowest splat sits exactly at Y=0
+                    if (minLocalY != 0.f)
+                        for (SplatStamp& s : brushPattern)
+                            s.localOffset.y() -= minLocalY;
                 }
 
                 // build spline from ALL stroke points
@@ -517,6 +555,25 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                         if (targetNormal.length() < 1e-6f) targetNormal = stampUpDir;
                         targetNormal.normalize();
 
+                        UT_Vector3F surfacePos = sp.pos;
+                        if (myBaseKDTree)
+                        {
+                            GA_OffsetArray nearby;
+                            // Use a small fixed radius — just the footprint of the stamp base
+                            float snapRadius = 0.05f;
+                            myBaseKDTree->findAllCloseIdx(sp.pos, snapRadius, nearby);
+                            if (nearby.size() > 0)
+                            {
+                                float lowestY = 1e10f;
+                                for (exint ni = 0; ni < nearby.size(); ni++)
+                                {
+                                    UT_Vector3F np = UT_Vector3F(baseGdp->getPos3(nearby(ni)));
+                                    if (np.y() < lowestY) lowestY = np.y();
+                                }
+                                surfacePos.y() = lowestY;
+                            }
+                        }
+
                         UT_QuaternionF normalRot = rotationBetween(stampUpDir, targetNormal);
                         UT_QuaternionF stampRot;
 
@@ -557,20 +614,11 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                             stampRot = normalRot;
                         }
 
-                        float minNormalProjection = 1e10f;
-                        for (const SplatStamp& s : brushPattern)
-                        {
-                            float proj = rotateVector(s.localOffset, stampRot).dot(targetNormal);
-                            if (proj < minNormalProjection)
-                                minNormalProjection = proj;
-                        }
-                        UT_Vector3F anchorLift = targetNormal * (-minNormalProjection);
-
                         for (const SplatStamp& s : brushPattern)
                         {
                             GaussianAttribs a;
-                            a.pos = sp.pos + rotateVector(s.localOffset, stampRot) + anchorLift;
-                            a.stampCenter = sp.pos;
+                            a.pos = surfacePos + rotateVector(s.localOffset, stampRot);
+                            a.stampCenter = surfacePos;
                             a.piece = piece;
                             a.cd = s.cd;
                             a.alpha = s.alpha;
@@ -578,7 +626,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
 
                             UT_QuaternionF splatOrient(s.orient.x(), s.orient.y(),
                                 s.orient.z(), s.orient.w());
-                            UT_QuaternionF rotated = multiplyQuat(splatOrient, stampRot);
+                            UT_QuaternionF rotated = multiplyQuat(stampRot, splatOrient);
                             a.orient = UT_Vector4F(rotated.x(), rotated.y(),
                                 rotated.z(), rotated.w());
 
@@ -687,7 +735,6 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
 }
         else if (operation == 2 && baseGdp) // erase mode
         {
-            // only erase base scene if toggle is on
             if (ERASEBASE(now))
             {
                 GA_Offset bptoff;
@@ -710,27 +757,15 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                 }
             }
 
-            GA_ROHandleV3 tgt_rayDir(targetGdp->findFloatTuple(GA_ATTRIB_POINT, "rayDir", 3));
-
             UT_Array<int> stampKeysToErase;
             for (auto& kv : myStampedGaussians)
             {
                 const UT_Vector3F& splatPos = kv.second.pos;
                 bool shouldErase = false;
-                int spIdx = 0;
-                GA_FOR_ALL_PTOFF(targetGdp, ptoff)
+                for (exint si = 0; si < newStrokePositions.size(); si++)
                 {
-                    if (spIdx < myLastProcessedStrokeSize - (int)newStrokePositions.size())
-                    {
-                        spIdx++; continue;
-                    } // only new stroke points
-
-                    UT_Vector3F sp = UT_Vector3F(targetGdp->getPos3(ptoff));
-                    UT_Vector3F rd(0, 0, -1);
-                    if (tgt_rayDir.isValid())
-                        rd = UT_Vector3F(tgt_rayDir.get(ptoff));
-                    rd.normalize();
-
+                    const UT_Vector3F& sp = newStrokePositions[si];
+                    const UT_Vector3F& rd = newStrokeRayDirs[si];
                     UT_Vector3F diff = splatPos - sp;
                     float along = diff.dot(rd);
                     UT_Vector3F perp = diff - rd * along;
@@ -739,16 +774,13 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                         shouldErase = true;
                         break;
                     }
-                    spIdx++;
                 }
                 if (shouldErase)
                     stampKeysToErase.append(kv.first);
             }
-
             for (int k : stampKeysToErase)
                 myStampedGaussians.erase(k);
 
-            // always remove paint modifications
             UT_Array<GA_Index> toRemove;
             for (auto& kv : myPaintedAttribs)
             {
@@ -769,7 +801,8 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
             }
             for (GA_Index idx : toRemove)
                 myPaintedAttribs.erase(idx);
-        }
+                }
+
     }
     else if (targetGdp && targetGdp->getNumPoints() == 0)
     {
@@ -781,6 +814,7 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
         myKnownPieces.clear();
         myLastProcessedStrokeSize = 0;
         myNextStampId = 0;
+        myOperationSwitchStrokeSize = 0;
     }
 
     // ── build output ──────────────────────────────────────────────────────
