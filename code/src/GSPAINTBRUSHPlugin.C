@@ -17,6 +17,7 @@
 #include <map>
 #include "GSPAINTBRUSHPlugin.h"
 #include <CH/CH_Manager.h>
+#include <PRM/PRM_Conditional.h>
 
 using namespace HDK_Sample;
 
@@ -55,6 +56,7 @@ static PRM_Name names[] = {
     PRM_Name("paint_scale",   "Modify Scale"),
     PRM_Name("erase_base", "Erase Base Scene"),
     PRM_Name("orient_mode", "Orient Mode"),
+    PRM_Name("paint_scale_mul", "Scale Multiplier"),
 };
 
 static PRM_Default scaleDefault(1.0f);
@@ -71,7 +73,7 @@ static PRM_Range brushRadiusRange(PRM_RANGE_UI, 0.01f, PRM_RANGE_UI, 5.0f);
 // operation tabs
 static PRM_Default switcher_tabs[] = {
     PRM_Default(4, "Stamp"),   // 4 parms in stamp tab
-    PRM_Default(6, "Paint"),   // 6 parms in paint tab
+    PRM_Default(7, "Paint"),   // 7 parms in paint tab
     PRM_Default(1, "Erase"),   // 1 parm in erase tab
 };
 
@@ -100,6 +102,12 @@ static PRM_Default paintAlphaDefault(0.5f);
 static PRM_Default paintColorDefault[] = {
     PRM_Default(1.0f), PRM_Default(0.0f), PRM_Default(0.0f)
 };
+static PRM_Range scaleMulRange(PRM_RANGE_UI, 0.1f, PRM_RANGE_UI, 3.0f);
+static PRM_Default scaleMulDefault(1.0f);
+
+static PRM_Conditional colorConditional("{ paint_cd == 0 }", PRM_CONDTYPE_DISABLE);
+static PRM_Conditional alphaConditional("{ paint_alpha_on == 0 }", PRM_CONDTYPE_DISABLE);
+static PRM_Conditional scaleConditional("{ paint_scale == 0 }", PRM_CONDTYPE_DISABLE);
 
 // event menu
 static PRM_Name eventMenuNames[] = {
@@ -131,12 +139,13 @@ SOP_GSPaintBrush::myTemplateList[] =
     PRM_Template(PRM_ORD,  1, &names[17], &orientModeDefault, &orientModeMenu),
 
     // --- paint tab ---
-    PRM_Template(PRM_RGB_J, 3, &names[10], paintColorDefault),
-    PRM_Template(PRM_FLT,   1, &names[11], &paintAlphaDefault, nullptr, &opacityRange),
-    PRM_Template(PRM_ORD,      1, &names[12], &colorSourceDefault, &colorSourceMenu),
     PRM_Template(PRM_TOGGLE,   1, &names[13]),  // modify color
+    PRM_Template(PRM_ORD,   1, &names[12], &colorSourceDefault, &colorSourceMenu, nullptr, 0, 0, 1, nullptr, &colorConditional),
+    PRM_Template(PRM_RGB_J, 3, &names[10], paintColorDefault, nullptr, nullptr, 0, 0, 1, nullptr, &colorConditional),
     PRM_Template(PRM_TOGGLE,   1, &names[14]),  // modify alpha
+    PRM_Template(PRM_FLT,   1, &names[11], &paintAlphaDefault, nullptr, &opacityRange, 0, 0, 1, nullptr, &alphaConditional),
     PRM_Template(PRM_TOGGLE,   1, &names[15]),  // modify scale
+    PRM_Template(PRM_FLT,   1, &names[18], &scaleMulDefault, nullptr, &scaleMulRange, 0, 0, 1, nullptr, &scaleConditional),
 
     // --- erase tab ---
     PRM_Template(PRM_TOGGLE, 1, &names[16]),  // erase base scene
@@ -482,8 +491,8 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                     }
 
                     // After building brushPattern, find the true minimum Y projection
-// in the unrotated (stamp-up = Y) frame, and subtract it out
-// so the bottom of the stamp is guaranteed to be at localOffset.y == 0.
+                    // in the unrotated (stamp-up = Y) frame, and subtract it out
+                    // so the bottom of the stamp is guaranteed to be at localOffset.y == 0.
                     float minLocalY = 1e10f;
                     for (const SplatStamp& s : brushPattern)
                         if (s.localOffset.y() < minLocalY) minLocalY = s.localOffset.y();
@@ -659,6 +668,12 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
             float paintAlpha = PAINTALPHA(now);
             bool  modifyCd = PAINTCD(now);
             bool  modifyAlpha = PAINTALPHA2(now);
+            bool  modifyScale = PAINTSCALE(now);    // the toggle
+            float scaleMul = PAINTSCALEMUL(now);    // the multiplier
+
+            printf("[GSPaint] modifyScale=%d scaleMul=%f\n", (int)modifyScale, scaleMul);
+            fflush(stdout);
+
             UT_Vector3F paintColor(PAINTCOLOR(now));
 
             GA_ROHandleV3 src_cd(baseGdp->findFloatTuple(GA_ATTRIB_POINT, "Cd", 3));
@@ -705,6 +720,12 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                     attribs.cd = attribs.cd * inv + paintColor * blend;
                 if (modifyAlpha)
                     attribs.alpha = attribs.alpha * inv + blend;
+                if (modifyScale)
+                {
+                    attribs.scale.x() = attribs.scale.x() * inv + attribs.scale.x() * scaleMul * blend;
+                    attribs.scale.y() = attribs.scale.y() * inv + attribs.scale.y() * scaleMul * blend;
+                    attribs.scale.z() = attribs.scale.z() * inv + attribs.scale.z() * scaleMul * blend;
+                }
             }
 
             // stamped Gaussians — also direct iteration like old version
@@ -731,6 +752,13 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
                     a.cd = a.cd * inv + paintColor * blend;
                 if (modifyAlpha)
                     a.alpha = SYSclamp(a.alpha * inv + blend, 0.f, 1.f);
+
+                if (modifyScale)
+                {
+                    a.scale.x() = a.scale.x() * inv + a.scale.x() * scaleMul * blend;
+                    a.scale.y() = a.scale.y() * inv + a.scale.y() * scaleMul * blend;
+                    a.scale.z() = a.scale.z() * inv + a.scale.z() * scaleMul * blend;
+                }
             }
 }
         else if (operation == 2 && baseGdp) // erase mode

@@ -67,6 +67,7 @@ namespace HDK_Sample {
         int     PAINTCD(fpreal t) { return evalInt("paint_cd", 0, t); }
         int     PAINTALPHA2(fpreal t) { return evalInt("paint_alpha_on", 0, t); }
         int     PAINTSCALE(fpreal t) { return evalInt("paint_scale", 0, t); }
+        fpreal PAINTSCALEMUL(fpreal t) { return evalFloat("paint_scale_mul", 0, t); }
 
         UT_Vector3 ORIGIN(fpreal t)
         {
