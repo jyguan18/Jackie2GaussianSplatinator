@@ -298,6 +298,106 @@ MSS_GSPaintState::flushToStrokeNode(fpreal t, const char* event)
     redrawScene();
 }
 
+void MSS_GSPaintState::syncStrokeFromNode(fpreal t)
+{
+    SOP_Node* sop = (SOP_Node*)getNode();
+    if (!sop) return;
+
+    OP_Network* net = sop->getParent();
+    if (!net) return;
+
+    OP_Node* strokeNode = net->findNode("stroke_points");
+    if (!strokeNode) return;
+
+    UT_String posStr, normStr, lenStr;
+
+    strokeNode->evalString(posStr, "point_positions", 0, t);
+    strokeNode->evalString(normStr, "point_normals", 0, t);
+    strokeNode->evalString(lenStr, "stroke_lengths", 0, t);
+
+    myStrokePositions.clear();
+    myStrokeNormals.clear();
+    myStrokeLengths.clear();
+    myStrokeRayDirs.clear();
+    myStrokeRayHitPositions.clear();
+    myStrokeBaseOrients.clear();
+
+    {
+        std::string s = posStr.toStdString();
+
+        size_t i = 0;
+        while ((i = s.find('(', i)) != std::string::npos)
+        {
+            float x, y, z;
+            if (sscanf(s.c_str() + i, "(%f,%f,%f)", &x, &y, &z) == 3)
+            {
+                myStrokePositions.append(UT_Vector3F(x, y, z));
+            }
+            i++;
+        }
+    }
+    {
+        std::string s = normStr.toStdString();
+
+        size_t i = 0;
+        while ((i = s.find('(', i)) != std::string::npos)
+        {
+            float nx, ny, nz;
+            float ox, oy, oz, ow;
+            float rx, ry, rz;
+
+            if (sscanf(s.c_str() + i,
+                "(%f,%f,%f,%f,%f,%f,%f,%f,%f,%f)",
+                &nx, &ny, &nz,
+                &ox, &oy, &oz, &ow,
+                &rx, &ry, &rz) == 10)
+            {
+                myStrokeNormals.append(UT_Vector3F(nx, ny, nz));
+                myStrokeBaseOrients.append(UT_Vector4F(ox, oy, oz, ow));
+                myStrokeRayDirs.append(UT_Vector3F(rx, ry, rz));
+
+                myStrokeRayHitPositions.append(myStrokePositions(
+                    myStrokeRayHitPositions.size()
+                ));
+            }
+            i++;
+        }
+    }
+    {
+        std::string s = lenStr.toStdString();
+
+        size_t i = 0;
+        while (i < s.size())
+        {
+            int val;
+            if (sscanf(s.c_str() + i, "%d", &val) == 1)
+            {
+                myStrokeLengths.append(val);
+
+                // advance past number
+                while (i < s.size() && (isdigit(s[i]) || s[i] == '-'))
+                    i++;
+            }
+            else
+            {
+                i++;
+            }
+        }
+    }
+    {
+        int total = 0;
+        for (int i = 0; i < myStrokeLengths.size(); i++)
+            total += myStrokeLengths[i];
+
+        if (total != myStrokePositions.size())
+        {
+            myStrokeLengths.clear();
+            if (myStrokePositions.size() > 0)
+                myStrokeLengths.append(myStrokePositions.size());
+        }
+    }
+}
+
 int
 MSS_GSPaintState::handleMouseEvent(UI_Event* event)
 {
@@ -416,6 +516,11 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
 
         if (begin)
         {
+			syncStrokeFromNode(t);
+
+            // Increment strokeID.
+            myStrokeGeneration++;
+
             UT_String oldPos, oldNorm, oldLen;
 
             beginDistributedUndoBlock("GS Paint Stroke", ANYLEVEL);
@@ -434,8 +539,6 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                     myUndoOldNorm = oldNorm;
                     myUndoOldLen = oldLen;
 
-                    /*UT_String posStr;
-                    strokeNode->evalString(posStr, "point_positions", 0, t);*/
                     if (oldPos == "" || oldPos == "[]")
                     {
                         myStrokePositions.clear();

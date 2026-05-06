@@ -130,6 +130,9 @@ namespace HDK_Sample {
         float myLastOpacity;
         float myLastBrushRadius;
 
+        // Track undo state.
+        bool myStateRestoredFromUndo = false;
+
     protected:
         SOP_GSPaintBrush(OP_Network* net, const char* name, OP_Operator* op);
         virtual ~SOP_GSPaintBrush();

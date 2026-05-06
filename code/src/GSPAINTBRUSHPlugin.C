@@ -63,13 +63,12 @@ SOP_UndoGSPaintStroke::apply(const State& s)
     sop->myStampedGaussians = s.stamped;
     sop->myPaintedAttribs = s.painted;
     sop->myErasedPoints = s.erased;
-
     sop->myStrokeModeMap = s.strokeMode;
     sop->myKnownPieces = s.knownPieces;
-
     sop->myNextStampId = s.nextStampId;
-    sop->myLastProcessedStrokeSize = s.lastProcessedStrokeSize;
     sop->myOperationSwitchStrokeSize = s.operationSwitchStrokeSize;
+    sop->myLastProcessedStrokeSize = s.lastProcessedStrokeSize;
+    sop->myStateRestoredFromUndo = true;
 
     sop->forceRecook();
 }
@@ -420,7 +419,11 @@ SOP_GSPaintBrush::cookMySop(OP_Context& context)
     }
 
     // ── process NEW stroke points since last cook ─────────────────────────
-    if (targetGdp && (targetGdp->getNumPoints() > myLastProcessedStrokeSize || parmChanged))
+    if (myStateRestoredFromUndo)
+    {
+        myStateRestoredFromUndo = false;
+    }
+    else if (targetGdp && (targetGdp->getNumPoints() > myLastProcessedStrokeSize || parmChanged))
     {
         float brushRadius = BRUSH_RADIUS(now);
         float radius2 = brushRadius * brushRadius;

@@ -35,6 +35,7 @@ namespace HDK_Sample {
         void                 exit() override;
         void                 interrupt(BM_SimpleState* = 0) override;
         void                 resume(BM_SimpleState* = 0) override;
+        void                 syncStrokeFromNode(fpreal t);
         int                  handleMouseEvent(UI_Event* event) override;
         void                 doRender(RE_Render* r, int x, int y,
             int ghost) override;
@@ -95,6 +96,9 @@ namespace HDK_Sample {
         UT_String myUndoOldPos;
 		UT_String myUndoOldNorm;
         UT_String myUndoOldLen;
+
+        // Stroke id.
+        int myStrokeGeneration = 0;
 
         // Kd tree variable.
         std::unique_ptr<GEO_PointTreeGAOffset> myPointTree;
