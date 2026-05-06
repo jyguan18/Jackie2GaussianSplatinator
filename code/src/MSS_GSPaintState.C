@@ -419,15 +419,27 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
 
         if (begin)
         {
+            UT_String oldPos, oldNorm, oldLen;
+
+            beginDistributedUndoBlock("GS Paint Stroke", ANYLEVEL);
+
             OP_Network* net = sop->getParent();
             if (net)
             {
                 OP_Node* strokeNode = net->findNode("stroke_points");
                 if (strokeNode)
                 {
-                    UT_String posStr;
-                    strokeNode->evalString(posStr, "point_positions", 0, t);
-                    if (posStr == "" || posStr == "[]")
+                    strokeNode->evalString(oldPos, "point_positions", 0, t);
+                    strokeNode->evalString(oldNorm, "point_normals", 0, t);
+                    strokeNode->evalString(oldLen, "stroke_lengths", 0, t);
+
+                    myUndoOldPos = oldPos;
+                    myUndoOldNorm = oldNorm;
+                    myUndoOldLen = oldLen;
+
+                    /*UT_String posStr;
+                    strokeNode->evalString(posStr, "point_positions", 0, t);*/
+                    if (oldPos == "" || oldPos == "[]")
                     {
                         myStrokePositions.clear();
                         myStrokeNormals.clear();
@@ -545,12 +557,39 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
 
         if (end && myIsDrawing)
         {
+            OP_Network* net = sop->getParent();
+            if (!net) return 1;
+
+            OP_Node* strokeNode = net->findNode("stroke_points");
+            if (!strokeNode) return 1;
+
             int strokeLen = myStrokePositions.size() - myCurrentStrokeStart;
             if (strokeLen > 0)
                 myStrokeLengths.append(strokeLen);
+
             myIsDrawing = false;
+
             flushToStrokeNode(t, "end");
+            UT_String newPos, newNorm, newLen;
+
+            strokeNode->evalString(newPos, "point_positions", 0, t);
+            strokeNode->evalString(newNorm, "point_normals", 0, t);
+            strokeNode->evalString(newLen, "stroke_lengths", 0, t);
+
+            UT_UndoManager* man = UTgetUndoManager();
+            if (man->willAcceptUndoAddition())
+            {
+                man->addToUndoBlock(
+                    new SOP_UndoGSPaintStroke(
+                        strokeNode,
+                        myUndoOldPos, newPos,
+                        myUndoOldNorm, newNorm,
+                        myUndoOldLen, newLen
+                    )
+                );
+            }
             endDistributedUndoBlock();
+
             myHighlightDirty = true;
         }
 

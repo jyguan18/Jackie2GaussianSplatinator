@@ -21,6 +21,58 @@
 
 using namespace HDK_Sample;
 
+SOP_UndoGSPaintStroke::SOP_UndoGSPaintStroke(
+    OP_Node* node,
+    const UT_String& oldPos,
+    const UT_String& newPos,
+    const UT_String& oldNorm,
+    const UT_String& newNorm,
+    const UT_String& oldLen,
+    const UT_String& newLen)
+    : myNodeId(node->getUniqueId()),
+    myOldPos(oldPos), myNewPos(newPos),
+    myOldNorm(oldNorm), myNewNorm(newNorm),
+    myOldLen(oldLen), myNewLen(newLen)
+{
+    // Optional but recommended: track memory usage
+    addToMemoryUsage(
+        oldPos.length() + newPos.length() +
+        oldNorm.length() + newNorm.length() +
+        oldLen.length() + newLen.length()
+    );
+}
+
+void
+SOP_UndoGSPaintStroke::undo()
+{
+    apply(myOldPos, myOldNorm, myOldLen);
+}
+
+void
+SOP_UndoGSPaintStroke::redo()
+{
+    apply(myNewPos, myNewNorm, myNewLen);
+}
+
+void
+SOP_UndoGSPaintStroke::apply(
+    const UT_String& pos,
+    const UT_String& norm,
+    const UT_String& len)
+{
+    OP_Node* node = OP_Node::lookupNode(myNodeId);
+    if (!node)
+        return;
+
+    fpreal t = CHgetEvalTime();
+
+    node->setString(pos, CH_STRING_LITERAL, "point_positions", 0, t);
+    node->setString(norm, CH_STRING_LITERAL, "point_normals", 0, t);
+    node->setString(len, CH_STRING_LITERAL, "stroke_lengths", 0, t);
+
+    node->forceRecook();
+}
+
 void
 newSopOperator(OP_OperatorTable* table)
 {

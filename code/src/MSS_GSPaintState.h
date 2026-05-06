@@ -91,6 +91,11 @@ namespace HDK_Sample {
         void        flushToStrokeNode(fpreal t, const char* event);
         void        buildRayIntersect();
 
+        // For undo.
+        UT_String myUndoOldPos;
+		UT_String myUndoOldNorm;
+        UT_String myUndoOldLen;
+
         // Kd tree variable.
         std::unique_ptr<GEO_PointTreeGAOffset> myPointTree;
     };

@@ -11,7 +11,34 @@
 // For kd tree.
 #include <GEO/GEO_PointTree.h>
 
+// For undo.
+#include <UT/UT_Undo.h>
+
 namespace HDK_Sample {
+    class SOP_UndoGSPaintStroke : public UT_Undo
+    {
+    public:
+        SOP_UndoGSPaintStroke(OP_Node* node,
+            const UT_String& oldPos,
+            const UT_String& newPos,
+            const UT_String& oldNorm,
+            const UT_String& newNorm,
+            const UT_String& oldLen,
+            const UT_String& newLen);
+
+        void undo() override;
+        void redo() override;
+
+    private:
+        int myNodeId;
+
+        UT_String myOldPos, myNewPos;
+        UT_String myOldNorm, myNewNorm;
+        UT_String myOldLen, myNewLen;
+
+        void apply(const UT_String&, const UT_String&, const UT_String&);
+    };
+
     class SOP_GSPaintBrush : public SOP_Node
     {
     public:
