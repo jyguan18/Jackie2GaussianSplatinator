@@ -410,12 +410,9 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
         UT_Vector3 rayorig, dir;
         mapToWorld(x, y, dir, rayorig);
 
-        bool begin = (event->reason == UI_VALUE_START ||
-            event->reason == UI_VALUE_PICKED);
-        bool active = (event->reason == UI_VALUE_ACTIVE ||
-            event->reason == UI_VALUE_PICKED);
-        bool end = (event->reason == UI_VALUE_CHANGED ||
-            event->reason == UI_VALUE_PICKED);
+        bool begin = (event->reason == UI_VALUE_START);
+        bool active = (event->reason == UI_VALUE_ACTIVE);
+        bool end = (event->reason == UI_VALUE_CHANGED);
 
         if (begin)
         {
@@ -451,7 +448,6 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
                     }
                 }
             }
-            beginDistributedUndoBlock("GS Paint Stroke", ANYLEVEL);
             myCurrentStrokeStart = myStrokePositions.size();
             myIsDrawing = true;
             myHighlightDirty = true;
@@ -563,39 +559,25 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
             OP_Node* strokeNode = net->findNode("stroke_points");
             if (!strokeNode) return 1;
 
-            int strokeLen = myStrokePositions.size() - myCurrentStrokeStart;
-            if (strokeLen > 0)
-                myStrokeLengths.append(strokeLen);
-
-            myIsDrawing = false;
-
-            flushToStrokeNode(t, "end");
-            UT_String newPos, newNorm, newLen;
-
-            strokeNode->evalString(newPos, "point_positions", 0, t);
-            strokeNode->evalString(newNorm, "point_normals", 0, t);
-            strokeNode->evalString(newLen, "stroke_lengths", 0, t);
-
             UT_UndoManager* man = UTgetUndoManager();
 
             if (man->willAcceptUndoAddition())
             {
-				SOP_GSPaintBrush* paintSop = dynamic_cast<SOP_GSPaintBrush*>(sop);
-                auto* undo = new SOP_UndoGSPaintStroke(paintSop); // captures BEFORE
+                SOP_GSPaintBrush* paintSop =
+                    dynamic_cast<SOP_GSPaintBrush*>(sop);
 
-                // Perform your stroke finalization FIRST
+                auto* undo = new SOP_UndoGSPaintStroke(paintSop);
                 int strokeLen = myStrokePositions.size() - myCurrentStrokeStart;
                 if (strokeLen > 0)
                     myStrokeLengths.append(strokeLen);
 
                 myIsDrawing = false;
+
                 flushToStrokeNode(t, "end");
-
-                // NOW capture AFTER state
                 undo->capture(undo->myAfter, paintSop);
-
                 man->addToUndoBlock(undo);
             }
+
             endDistributedUndoBlock();
 
             myHighlightDirty = true;
