@@ -8,6 +8,8 @@
 #include <UT/UT_Array.h>
 #include <GA/GA_Types.h>
 
+#include <GA/GA_AttributeRefMap.h>
+
 // For kd tree.
 #include <GEO/GEO_PointTree.h>
 
@@ -15,16 +17,45 @@
 #include <UT/UT_Undo.h>
 
 namespace HDK_Sample {
+    // persistent accumulated state
+    struct GaussianAttribs {
+        UT_Vector3F cd;
+        float       alpha;
+        UT_Vector3F scale;
+        UT_Vector4F orient;
+        UT_Vector3F pos;
+        UT_Vector3F stampCenter; // spline hit point this splat was placed from
+        int         piece;       // which stroke this splat belongs to
+        int         seqIdx;      // position within the stroke spline (for ordering)
+    };
+
+    class SOP_GSPaintBrush;
+
     class SOP_UndoGSPaintStroke : public UT_Undo
     {
     public:
-        SOP_UndoGSPaintStroke(OP_Node* node,
-            const UT_String& oldPos,
-            const UT_String& newPos,
-            const UT_String& oldNorm,
-            const UT_String& newNorm,
-            const UT_String& oldLen,
-            const UT_String& newLen);
+        struct State
+        {
+            UT_Map<int, GaussianAttribs> stamped;
+            UT_Map<GA_Index, GaussianAttribs> painted;
+            UT_Set<GA_Index> erased;
+
+            UT_Map<int, int> strokeMode;
+            UT_Set<int> knownPieces;
+
+            int nextStampId;
+            int lastProcessedStrokeSize;
+            int operationSwitchStrokeSize;
+        };
+
+
+        SOP_UndoGSPaintStroke(SOP_GSPaintBrush* sop);
+
+        State myBefore;
+        State myAfter;
+
+        void capture(State& s, SOP_GSPaintBrush* sop);
+        void apply(const State& s);
 
         void undo() override;
         void redo() override;
@@ -32,11 +63,6 @@ namespace HDK_Sample {
     private:
         int myNodeId;
 
-        UT_String myOldPos, myNewPos;
-        UT_String myOldNorm, myNewNorm;
-        UT_String myOldLen, myNewLen;
-
-        void apply(const UT_String&, const UT_String&, const UT_String&);
     };
 
     class SOP_GSPaintBrush : public SOP_Node
@@ -61,6 +87,48 @@ namespace HDK_Sample {
         {
             return myBaseKDTree && myBaseKDBuildFrame == frame;
         }
+
+        // Updated stamp mode: map of stamp ID to GaussianAttrib.
+        UT_Map<int, GaussianAttribs> myStampedGaussians;
+        // Stamp ID counter.
+        int myNextStampId;
+
+        int myLastOperation = -1;
+        int myOperationSwitchStrokeSize = 0;
+
+        // paint mode: per-point color overrides (keyed by point index in base scene)
+        UT_Map<GA_Index, GaussianAttribs> myPaintedAttribs;
+
+        // erase mode: set of erased point indices from base scene
+        UT_Set<GA_Index> myErasedPoints;
+
+        // Index to operation mode (stamp/paint/erase) for each stroke.
+        UT_Map<int, int> myStrokeModeMap;
+        // set of all piece indices seen so far, to detect newly arriving pieces.
+        UT_Set<int> myKnownPieces;
+
+        // track last processed stroke length to avoid reprocessing
+        int myLastProcessedStrokeSize;
+
+        std::unique_ptr<GEO_PointTreeGAOffset> myBaseKDTree;
+        exint myBaseKDBuildFrame = -1;
+
+        std::unique_ptr<GEO_PointTreeGAOffset> myStampKDTree;
+
+        UT_Array<GA_Offset> myStampPointOffsets;
+        UT_Array<UT_Vector3F> myStampPositions;
+
+        GU_Detail myTempStampGeo;
+        UT_Array<int> myStampKeyOrder;
+
+        int  myCurrPoint;
+        int  myTotalPoints;
+
+        // Track last updated parameters.
+        float myLastDensity;
+        float myLastScale;
+        float myLastOpacity;
+        float myLastBrushRadius;
 
     protected:
         SOP_GSPaintBrush(OP_Network* net, const char* name, OP_Operator* op);
@@ -113,60 +181,6 @@ namespace HDK_Sample {
         int ORIENTMODE(fpreal t) { return evalInt("orient_mode", 0, t); }
 
         static int onClearPoints(void* data, int index, fpreal t, const PRM_Template*);
-
-        // persistent accumulated state
-        struct GaussianAttribs {
-            UT_Vector3F cd;
-            float       alpha;
-            UT_Vector3F scale;
-            UT_Vector4F orient;
-            UT_Vector3F pos;
-            UT_Vector3F stampCenter; // spline hit point this splat was placed from
-            int         piece;       // which stroke this splat belongs to
-            int         seqIdx;      // position within the stroke spline (for ordering)
-        };
-
-        // Updated stamp mode: map of stamp ID to GaussianAttrib.
-        UT_Map<int, GaussianAttribs> myStampedGaussians;
-        // Stamp ID counter.
-        int myNextStampId;
-
-        int myLastOperation = -1;
-        int myOperationSwitchStrokeSize = 0;
-
-        // paint mode: per-point color overrides (keyed by point index in base scene)
-        UT_Map<GA_Index, GaussianAttribs> myPaintedAttribs;
-
-        // erase mode: set of erased point indices from base scene
-        UT_Set<GA_Index> myErasedPoints;
-
-        // Index to operation mode (stamp/paint/erase) for each stroke.
-        UT_Map<int, int> myStrokeModeMap;
-        // set of all piece indices seen so far, to detect newly arriving pieces.
-        UT_Set<int> myKnownPieces;
-
-        // track last processed stroke length to avoid reprocessing
-        int myLastProcessedStrokeSize;
-
-        std::unique_ptr<GEO_PointTreeGAOffset> myBaseKDTree;
-        exint myBaseKDBuildFrame = -1;
-
-        std::unique_ptr<GEO_PointTreeGAOffset> myStampKDTree;
-
-        UT_Array<GA_Offset> myStampPointOffsets;
-        UT_Array<UT_Vector3F> myStampPositions;
-
-        GU_Detail myTempStampGeo;
-        UT_Array<int> myStampKeyOrder;
-
-        int  myCurrPoint;
-        int  myTotalPoints;
-
-        // Track last updated parameters.
-        float myLastDensity;
-        float myLastScale;
-        float myLastOpacity;
-        float myLastBrushRadius;
     };
 } // End HDK_Sample namespace
 

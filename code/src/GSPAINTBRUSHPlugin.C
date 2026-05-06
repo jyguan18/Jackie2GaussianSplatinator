@@ -21,56 +21,57 @@
 
 using namespace HDK_Sample;
 
-SOP_UndoGSPaintStroke::SOP_UndoGSPaintStroke(
-    OP_Node* node,
-    const UT_String& oldPos,
-    const UT_String& newPos,
-    const UT_String& oldNorm,
-    const UT_String& newNorm,
-    const UT_String& oldLen,
-    const UT_String& newLen)
-    : myNodeId(node->getUniqueId()),
-    myOldPos(oldPos), myNewPos(newPos),
-    myOldNorm(oldNorm), myNewNorm(newNorm),
-    myOldLen(oldLen), myNewLen(newLen)
+SOP_UndoGSPaintStroke::SOP_UndoGSPaintStroke(SOP_GSPaintBrush* sop)
 {
-    // Optional but recommended: track memory usage
-    addToMemoryUsage(
-        oldPos.length() + newPos.length() +
-        oldNorm.length() + newNorm.length() +
-        oldLen.length() + newLen.length()
-    );
+    myNodeId = sop->getUniqueId();
+    capture(myBefore, sop);
+}
+
+void SOP_UndoGSPaintStroke::undo()
+{
+    apply(myBefore);
+}
+
+void SOP_UndoGSPaintStroke::redo()
+{
+    apply(myAfter);
 }
 
 void
-SOP_UndoGSPaintStroke::undo()
+SOP_UndoGSPaintStroke::capture(State& s, SOP_GSPaintBrush* sop)
 {
-    apply(myOldPos, myOldNorm, myOldLen);
+    s.stamped = sop->myStampedGaussians;
+    s.painted = sop->myPaintedAttribs;
+    s.erased = sop->myErasedPoints;
+
+    s.strokeMode = sop->myStrokeModeMap;
+    s.knownPieces = sop->myKnownPieces;
+
+    s.nextStampId = sop->myNextStampId;
+    s.lastProcessedStrokeSize = sop->myLastProcessedStrokeSize;
+    s.operationSwitchStrokeSize = sop->myOperationSwitchStrokeSize;
 }
 
 void
-SOP_UndoGSPaintStroke::redo()
+SOP_UndoGSPaintStroke::apply(const State& s)
 {
-    apply(myNewPos, myNewNorm, myNewLen);
-}
+    SOP_GSPaintBrush* sop =
+        (SOP_GSPaintBrush*)OP_Node::lookupNode(myNodeId);
 
-void
-SOP_UndoGSPaintStroke::apply(
-    const UT_String& pos,
-    const UT_String& norm,
-    const UT_String& len)
-{
-    OP_Node* node = OP_Node::lookupNode(myNodeId);
-    if (!node)
-        return;
+    if (!sop) return;
 
-    fpreal t = CHgetEvalTime();
+    sop->myStampedGaussians = s.stamped;
+    sop->myPaintedAttribs = s.painted;
+    sop->myErasedPoints = s.erased;
 
-    node->setString(pos, CH_STRING_LITERAL, "point_positions", 0, t);
-    node->setString(norm, CH_STRING_LITERAL, "point_normals", 0, t);
-    node->setString(len, CH_STRING_LITERAL, "stroke_lengths", 0, t);
+    sop->myStrokeModeMap = s.strokeMode;
+    sop->myKnownPieces = s.knownPieces;
 
-    node->forceRecook();
+    sop->myNextStampId = s.nextStampId;
+    sop->myLastProcessedStrokeSize = s.lastProcessedStrokeSize;
+    sop->myOperationSwitchStrokeSize = s.operationSwitchStrokeSize;
+
+    sop->forceRecook();
 }
 
 void

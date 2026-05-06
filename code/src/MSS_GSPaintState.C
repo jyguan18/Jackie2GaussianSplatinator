@@ -577,16 +577,24 @@ MSS_GSPaintState::handleMouseEvent(UI_Event* event)
             strokeNode->evalString(newLen, "stroke_lengths", 0, t);
 
             UT_UndoManager* man = UTgetUndoManager();
+
             if (man->willAcceptUndoAddition())
             {
-                man->addToUndoBlock(
-                    new SOP_UndoGSPaintStroke(
-                        strokeNode,
-                        myUndoOldPos, newPos,
-                        myUndoOldNorm, newNorm,
-                        myUndoOldLen, newLen
-                    )
-                );
+				SOP_GSPaintBrush* paintSop = dynamic_cast<SOP_GSPaintBrush*>(sop);
+                auto* undo = new SOP_UndoGSPaintStroke(paintSop); // captures BEFORE
+
+                // Perform your stroke finalization FIRST
+                int strokeLen = myStrokePositions.size() - myCurrentStrokeStart;
+                if (strokeLen > 0)
+                    myStrokeLengths.append(strokeLen);
+
+                myIsDrawing = false;
+                flushToStrokeNode(t, "end");
+
+                // NOW capture AFTER state
+                undo->capture(undo->myAfter, paintSop);
+
+                man->addToUndoBlock(undo);
             }
             endDistributedUndoBlock();
 
